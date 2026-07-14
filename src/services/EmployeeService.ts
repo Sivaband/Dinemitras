@@ -1,10 +1,10 @@
 import { Employee } from '../models/Employee';
-import { IEmployeeRepository, LocalEmployeeRepository } from '../repositories/EmployeeRepository';
+import { IEmployeeRepository, SupabaseEmployeeRepository } from '../repositories/EmployeeRepository';
 
 export class EmployeeService {
   private repository: IEmployeeRepository;
 
-  constructor(repository: IEmployeeRepository = new LocalEmployeeRepository()) {
+  constructor(repository: IEmployeeRepository = new SupabaseEmployeeRepository()) {
     this.repository = repository;
   }
 

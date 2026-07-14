@@ -4,6 +4,7 @@
  */
 
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
+import { createClient } from '@supabase/supabase-js';
 import { supabase } from './supabaseClient';
 import {
   Restaurant,
@@ -68,7 +69,14 @@ const toUUID = (id: string): string => {
   if (hex.length < 32) {
     hex = hex.padEnd(32, '0');
   } else {
-    hex = hex.substring(0, 32);
+    // FNV-1a 32-bit hash of the entire original string to guarantee uniqueness
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < id.length; i++) {
+      h ^= id.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    const hashHex = (h >>> 0).toString(16).padStart(8, '0');
+    hex = hex.substring(0, 24) + hashHex;
   }
 
   return `${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20, 32)}`;
@@ -123,6 +131,9 @@ interface AppStateContextType {
   setSelectedBranchId: (id: string) => void;
   setSelectedTableId: (id: string) => void;
   setIsQrModalOpen: (open: boolean) => void;
+  setTables: React.Dispatch<React.SetStateAction<RestaurantTable[]>>;
+  setTableSessions: React.Dispatch<React.SetStateAction<TableSession[]>>;
+  setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
   
   // Simulation methods
   customerScanQR: (restaurantId: string, branchId: string, tableId: string) => void;
@@ -195,9 +206,9 @@ interface AppStateContextType {
   logout: () => void;
   updateOnboardingStep: (step: number) => void;
   verifyOnboardingEmail: () => void;
-  onboardingSetupRestaurant: (params: Partial<Restaurant>) => void;
-  onboardingSetupBranch: (name: string, address: string, phone: string) => void;
-  onboardingSetupTables: (count: number) => void;
+  onboardingSetupRestaurant: (params: Partial<Restaurant>) => Promise<{ success: boolean; error?: string }>;
+  onboardingSetupBranch: (name: string, address: string, phone: string) => Promise<{ success: boolean; error?: string }>;
+  onboardingSetupTables: (count: number) => Promise<{ success: boolean; error?: string }>;
   addStaffMember: (fullName: string, email: string, role: string, branchId: string, phone?: string, password?: string, status?: 'active' | 'inactive') => { success: boolean; error?: string };
   updateStaffMember: (id: string, updates: Partial<UserProfile>) => void;
   deleteStaffMember: (id: string) => void;
@@ -475,6 +486,15 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       branchId: u.branchId ? toUUID(u.branchId) : undefined
     }));
   });
+
+  const updateAndPersistUsers = (newUsersOrFn: UserProfile[] | ((prev: UserProfile[]) => UserProfile[])) => {
+    setUsers((prev) => {
+      const next = typeof newUsersOrFn === 'function' ? newUsersOrFn(prev) : newUsersOrFn;
+      localStorage.setItem('qr_users', JSON.stringify(next));
+      window.dispatchEvent(new CustomEvent('qr_users_updated', { detail: next }));
+      return next;
+    });
+  };
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => {
     const saved = localStorage.getItem('qr_current_user');
     if (saved) {
@@ -489,6 +509,16 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     }
     return null;
   });
+
+  const updateAndPersistCurrentUser = (newUser: UserProfile | null) => {
+    setCurrentUser(newUser);
+    if (newUser) {
+      localStorage.setItem('qr_current_user', JSON.stringify(newUser));
+    } else {
+      localStorage.removeItem('qr_current_user');
+    }
+    window.dispatchEvent(new CustomEvent('qr_current_user_updated', { detail: newUser }));
+  };
 
   // Auto-Persist States
   useEffect(() => {
@@ -525,18 +555,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem('qr_print_logs', JSON.stringify(billPrintLogs));
   }, [billPrintLogs]);
   useEffect(() => {
-    localStorage.setItem('qr_users', JSON.stringify(users));
-  }, [users]);
-  useEffect(() => {
     localStorage.setItem('qr_branches', JSON.stringify(branches));
   }, [branches]);
-  useEffect(() => {
-    if (currentUser) {
-      localStorage.setItem('qr_current_user', JSON.stringify(currentUser));
-    } else {
-      localStorage.removeItem('qr_current_user');
-    }
-  }, [currentUser]);
 
   // Sync users and current user dynamically when modified by repository
   useEffect(() => {
@@ -625,7 +645,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
             name: b.name,
             address: b.address,
             phone: b.phone,
-            is_active: b.isActive !== false,
+            status: b.isActive !== false ? 'active' : 'inactive',
             is_default: b.isDefault || false
           })));
         if (seedBranchErr) throw seedBranchErr;
@@ -685,6 +705,33 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       const { data: dbItems } = await supabase.from('menu_items').select('*');
       const { data: dbSessions } = await supabase.from('table_sessions').select('*');
       const { data: dbOrders } = await supabase.from('orders').select('*');
+      let { data: dbProfiles } = await supabase.from('profiles').select('*');
+
+      if (!dbProfiles || dbProfiles.length === 0) {
+        const { error: seedProfileErr } = await supabase
+          .from('profiles')
+          .insert(INITIAL_USERS.map((u) => ({
+            id: toUUID(u.id),
+            restaurant_id: u.restaurantId ? toUUID(u.restaurantId) : null,
+            branch_id: u.branchId ? toUUID(u.branchId) : null,
+            full_name: u.fullName,
+            email: u.email.toLowerCase().trim(),
+            phone: u.phone,
+            role: u.role,
+            status: u.status || 'active',
+            profile_image: `pwd:${u.password}`
+          })));
+
+        if (seedProfileErr) {
+          console.warn("Could not seed default profiles:", seedProfileErr.message);
+        } else {
+          const { data: refetched } = await supabase.from('profiles').select('*');
+          if (refetched) {
+            dbProfiles = refetched;
+            addSystemNotification("👤 Default staff profiles seeded to Supabase!");
+          }
+        }
+      }
 
       if (currentRests) {
         setRestaurants(currentRests.map((r: any) => ({
@@ -823,6 +870,43 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
             updatedAt: o.created_at || new Date().toISOString()
           };
         }));
+      }
+
+      if (dbProfiles) {
+        const loadedUsers: UserProfile[] = dbProfiles.map((p: any) => {
+          let userPassword = 'staff123';
+          if (p.profile_image && p.profile_image.startsWith('pwd:')) {
+            userPassword = p.profile_image.substring(4);
+          }
+          return {
+            id: p.id,
+            email: p.email,
+            fullName: p.full_name,
+            phone: p.phone || '',
+            role: p.role as UserRole,
+            restaurantId: p.restaurant_id || undefined,
+            branchId: p.branch_id || undefined,
+            createdAt: p.created_at,
+            isVerified: true,
+            onboardingStep: 5,
+            status: p.status || 'active',
+            password: userPassword,
+            profileImage: p.profile_image && p.profile_image.startsWith('pwd:') ? '' : p.profile_image
+          };
+        });
+        setUsers((prev) => {
+          const merged = [...prev];
+          loadedUsers.forEach((u) => {
+            const idx = merged.findIndex((x) => x.id === u.id || x.email.toLowerCase() === u.email.toLowerCase());
+            if (idx >= 0) {
+              merged[idx] = { ...merged[idx], ...u };
+            } else {
+              merged.push(u);
+            }
+          });
+          localStorage.setItem('qr_users', JSON.stringify(merged));
+          return merged;
+        });
       }
     } catch (err: any) {
       console.error("Supabase load error:", err.message);
@@ -989,9 +1073,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       setActiveSession(null);
       setCart([]);
       setActiveCoupon(null);
-      setSelectedRestaurantId('rest_1');
-      setSelectedBranchId('branch_1a');
-      setSelectedTableId('table_1_2');
+      setSelectedRestaurantId(toUUID('rest_1'));
+      setSelectedBranchId(toUUID('branch_1a'));
+      setSelectedTableId(toUUID('table_1_2'));
       addSystemNotification('💻 Sandbox database successfully reset to factory defaults.');
     } catch (e: any) {
       console.error("Failed to reset database:", e.message);
@@ -1263,7 +1347,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     const totalAmount = parseFloat((subtotal - discountAmount + gstAmount + serviceChargeAmount).toFixed(2));
 
     const tbl = tables.find((t) => t.id === activeSession.tableId);
-    const orderId = `ord_${Date.now()}`;
+    const orderId = toUUID(`ord_${Date.now()}`);
 
     const orderItems: OrderItem[] = cart.map((c) => ({
       id: `orditem_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
@@ -1574,7 +1658,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     const serviceChargeAmount = parseFloat((subtotal * (rest.serviceChargePercent / 100)).toFixed(2));
     const totalAmount = parseFloat((subtotal + gstAmount + serviceChargeAmount).toFixed(2));
 
-    const orderId = `ord_${Date.now()}`;
+    const orderId = toUUID(`ord_${Date.now()}`);
     const orderItems: OrderItem[] = items.map((c) => ({
       id: `orditem_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
       itemId: c.item.id,
@@ -2003,7 +2087,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
 
   // Admin functions
   const adminAddCategory = async (cat: Omit<MenuCategory, 'id'>) => {
-    const catId = `cat_${Date.now()}`;
+    const catId = toUUID(`cat_${Date.now()}`);
     const newCat: MenuCategory = {
       ...cat,
       id: catId,
@@ -2042,7 +2126,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   };
 
   const adminAddMenuItem = async (item: Omit<MenuItem, 'id'>) => {
-    const itemId = `item_${Date.now()}`;
+    const itemId = toUUID(`item_${Date.now()}`);
     const newItem: MenuItem = {
       ...item,
       id: itemId,
@@ -2155,7 +2239,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     let branchId = table.branchId;
     const existingBranchesForRestaurant = branches.filter((b) => b.restaurantId === table.restaurantId);
     if (existingBranchesForRestaurant.length === 0) {
-      const newBranchId = `branch_${Date.now()}`;
+      const newBranchId = toUUID(`branch_${Date.now()}`);
       const parentRestaurant = restaurants.find((r) => r.id === table.restaurantId);
       const newBranch: Branch = {
         id: newBranchId,
@@ -2183,7 +2267,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       return { success: false, error: `Table "${table.tableNumber}" already exists in this branch.` };
     }
 
-    const tableId = `table_${Date.now()}`;
+    const tableId = toUUID(`table_${Date.now()}`);
     const qrUrl = `${window.location.origin}/menu/${table.restaurantId}/${branchId}/${tableId}`;
     const newTable: RestaurantTable = {
       ...table,
@@ -2285,7 +2369,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     if (!currentUser || !currentUser.restaurantId) {
       return { success: false, error: 'No active restaurant tenant found.' };
     }
-    const bId = `branch_${Date.now()}`;
+    const bId = toUUID(`branch_${Date.now()}`);
     const newBranch: Branch = {
       id: bId,
       restaurantId: currentUser.restaurantId,
@@ -2354,7 +2438,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   };
 
   const superAdminCreateRestaurant = (restaurant: Omit<Restaurant, 'id' | 'rating'>) => {
-    const restId = `rest_${Date.now()}`;
+    const restId = toUUID(`rest_${Date.now()}`);
     const newRest: Restaurant = {
       id: restId,
       name: restaurant.name,
@@ -2377,7 +2461,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     };
     setRestaurants((prev) => [...prev, newRest]);
     
-    const bId = `branch_${Date.now()}`;
+    const bId = toUUID(`branch_${Date.now()}`);
     const mainBranch: Branch = {
       id: bId,
       restaurantId: restId,
@@ -2432,7 +2516,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     setBanners((prev) => prev.filter((b) => b.restaurantId !== restaurantId));
     setOrders((prev) => prev.filter((o) => o.restaurantId !== restaurantId));
     setReceipts((prev) => prev.filter((r) => r.restaurantId !== restaurantId));
-    setUsers((prev) => prev.filter((u) => u.restaurantId !== restaurantId));
+    updateAndPersistUsers((prev) => prev.filter((u) => u.restaurantId !== restaurantId));
 
     supabase.from('restaurants').delete().eq('id', restaurantId).then();
 
@@ -2442,79 +2526,193 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
 
   // Authentication & Profiles state methods
   const login = async (email: string, password: string) => {
+    let supabaseAuthUser: any = null;
+    let authError: any = null;
+
     try {
       const { data, error } = await supabase.auth.signInWithPassword({
         email: email.toLowerCase().trim(),
         password: password
       });
+      if (error) {
+        authError = error;
+      } else if (data && data.user) {
+        supabaseAuthUser = data.user;
+      }
+    } catch (e) {
+      console.warn("Supabase Auth sign-in threw exception, trying local/profiles fallback", e);
+    }
 
-      if (!error && data.user) {
-        const meta = data.user.user_metadata || {};
-        const loggedUser: UserProfile = {
-          id: data.user.id,
-          email: data.user.email || email,
-          fullName: meta.fullName || 'User',
-          phone: meta.phone || '',
-          role: meta.role || UserRole.RESTAURANT_ADMIN,
-          restaurantId: meta.restaurantId,
-          branchId: meta.branchId,
-          createdAt: data.user.created_at,
-          isVerified: meta.isVerified ?? true,
-          onboardingStep: meta.onboardingStep ?? 5,
-          businessAddress: meta.businessAddress,
-          gstNumber: meta.gstNumber,
-          status: meta.status || 'active',
-        };
+    if (supabaseAuthUser) {
+      // Query database profiles table to get the most accurate profile details
+      const { data: profileData } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', supabaseAuthUser.id)
+        .maybeSingle();
 
-        if (loggedUser.status === 'inactive') {
-          return { success: false, error: 'Your staff account has been deactivated. Please contact your restaurant administrator.' };
-        }
+      const meta = supabaseAuthUser.user_metadata || {};
+      const loggedUser: UserProfile = {
+        id: supabaseAuthUser.id,
+        email: supabaseAuthUser.email || email,
+        fullName: profileData?.full_name || meta.fullName || 'User',
+        phone: profileData?.phone || meta.phone || '',
+        role: (profileData?.role || meta.role || UserRole.RESTAURANT_ADMIN) as UserRole,
+        restaurantId: profileData?.restaurant_id || meta.restaurantId,
+        branchId: profileData?.branch_id || meta.branchId,
+        createdAt: supabaseAuthUser.created_at,
+        isVerified: meta.isVerified ?? true,
+        onboardingStep: meta.onboardingStep ?? 5,
+        businessAddress: meta.businessAddress,
+        gstNumber: meta.gstNumber,
+        status: profileData?.status || meta.status || 'active',
+      };
 
-        const userWithModules = {
-          ...loggedUser,
-          authorizedModules: getAuthorizedModulesForRole(loggedUser.role),
-        };
-        setCurrentUser(userWithModules);
+      if (loggedUser.status === 'inactive') {
+        return { success: false, error: 'Your staff account has been deactivated. Please contact your restaurant administrator.' };
+      }
 
-        // Switch active workspace view role
-        if (loggedUser.role === UserRole.SUPER_ADMIN) {
-          setCurrentRole('superadmin');
-        } else if (loggedUser.role === UserRole.RESTAURANT_ADMIN) {
-          setCurrentRole('admin');
-          if (loggedUser.restaurantId) {
-            setSelectedRestaurantId(loggedUser.restaurantId);
-            const rBranch = branches.find((b) => b.restaurantId === loggedUser.restaurantId);
-            if (rBranch) {
-              setSelectedBranchId(rBranch.id);
-              const rTable = tables.find((t) => t.branchId === rBranch.id);
-              if (rTable) setSelectedTableId(rTable.id);
-            }
-          }
-        } else {
-          setCurrentRole('staff');
-          if (loggedUser.role === UserRole.KITCHEN) setStaffSubRole('kitchen');
-          else if (loggedUser.role === UserRole.CASHIER) setStaffSubRole('cashier');
-          else if (loggedUser.role === UserRole.MANAGER) setStaffSubRole('dashboard');
-          else if (loggedUser.role === UserRole.WAITER) setStaffSubRole('waiter');
-          
-          if (loggedUser.restaurantId) setSelectedRestaurantId(loggedUser.restaurantId);
-          if (loggedUser.branchId) {
-            setSelectedBranchId(loggedUser.branchId);
-            const rTable = tables.find((t) => t.branchId === loggedUser.branchId);
+      const userWithModules = {
+        ...loggedUser,
+        authorizedModules: getAuthorizedModulesForRole(loggedUser.role),
+      };
+      updateAndPersistCurrentUser(userWithModules);
+
+      // Switch active workspace view role
+      if (loggedUser.role === UserRole.SUPER_ADMIN) {
+        setCurrentRole('superadmin');
+      } else if (loggedUser.role === UserRole.RESTAURANT_ADMIN) {
+        setCurrentRole('admin');
+        if (loggedUser.restaurantId) {
+          setSelectedRestaurantId(loggedUser.restaurantId);
+          const rBranch = branches.find((b) => b.restaurantId === loggedUser.restaurantId);
+          if (rBranch) {
+            setSelectedBranchId(rBranch.id);
+            const rTable = tables.find((t) => t.branchId === rBranch.id);
             if (rTable) setSelectedTableId(rTable.id);
           }
         }
-
-        addSystemNotification(`🔑 Welcome back, ${loggedUser.fullName}! Logged in as [${loggedUser.role.toUpperCase()}].`);
-        return { success: true };
+      } else {
+        setCurrentRole('staff');
+        if (loggedUser.role === UserRole.KITCHEN) setStaffSubRole('kitchen');
+        else if (loggedUser.role === UserRole.CASHIER) setStaffSubRole('cashier');
+        else if (loggedUser.role === UserRole.MANAGER) setStaffSubRole('dashboard');
+        else if (loggedUser.role === UserRole.WAITER) setStaffSubRole('waiter');
+        
+        if (loggedUser.restaurantId) setSelectedRestaurantId(loggedUser.restaurantId);
+        if (loggedUser.branchId) {
+          setSelectedBranchId(loggedUser.branchId);
+          const rTable = tables.find((t) => t.branchId === loggedUser.branchId);
+          if (rTable) setSelectedTableId(rTable.id);
+        }
       }
-    } catch (e) {
-      console.warn("Supabase Auth failed, trying local fallback", e);
+
+      addSystemNotification(`🔑 Welcome back, ${loggedUser.fullName}! Logged in as [${loggedUser.role.toUpperCase()}].`);
+      return { success: true };
     }
 
+    // fallback: if Supabase Auth returned an error (e.g. Email not confirmed, etc.) OR didn't match,
+    // we query the `profiles` table in Supabase directly by email to check credentials!
+    try {
+      const { data: dbProfile, error: profileDbErr } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('email', email.toLowerCase().trim())
+        .maybeSingle();
+
+      if (!profileDbErr && dbProfile) {
+        // Extract stored password from profile_image if present (prefix pwd:)
+        let profilePassword = 'staff123';
+        if (dbProfile.profile_image && dbProfile.profile_image.startsWith('pwd:')) {
+          profilePassword = dbProfile.profile_image.substring(4);
+        } else {
+          // If profile_image doesn't have it, look up in the local `users` state list
+          const localUser = users.find((u) => u.email.toLowerCase() === email.toLowerCase().trim());
+          if (localUser && localUser.password) {
+            profilePassword = localUser.password;
+          }
+        }
+
+        if (profilePassword === password) {
+          if (dbProfile.status === 'inactive') {
+            return { success: false, error: 'Your staff account has been deactivated. Please contact your restaurant administrator.' };
+          }
+
+          const loggedUser: UserProfile = {
+            id: dbProfile.id,
+            email: dbProfile.email,
+            fullName: dbProfile.full_name,
+            phone: dbProfile.phone || '',
+            role: dbProfile.role as UserRole,
+            restaurantId: dbProfile.restaurant_id || undefined,
+            branchId: dbProfile.branch_id || undefined,
+            createdAt: dbProfile.created_at || new Date().toISOString(),
+            isVerified: true,
+            onboardingStep: 5,
+            status: dbProfile.status || 'active',
+            password: profilePassword
+          };
+
+          const userWithModules = {
+            ...loggedUser,
+            authorizedModules: getAuthorizedModulesForRole(loggedUser.role),
+          };
+          updateAndPersistCurrentUser(userWithModules);
+
+          // Add to local state if not exists
+          setUsers((prev) => {
+            const exists = prev.some((u) => u.id === loggedUser.id);
+            if (!exists) {
+              const updated = [...prev, loggedUser];
+              localStorage.setItem('qr_users', JSON.stringify(updated));
+              return updated;
+            }
+            return prev;
+          });
+
+          // Switch active workspace view role
+          if (loggedUser.role === UserRole.SUPER_ADMIN) {
+            setCurrentRole('superadmin');
+          } else if (loggedUser.role === UserRole.RESTAURANT_ADMIN) {
+            setCurrentRole('admin');
+            if (loggedUser.restaurantId) {
+              setSelectedRestaurantId(loggedUser.restaurantId);
+              const rBranch = branches.find((b) => b.restaurantId === loggedUser.restaurantId);
+              if (rBranch) {
+                setSelectedBranchId(rBranch.id);
+                const rTable = tables.find((t) => t.branchId === rBranch.id);
+                if (rTable) setSelectedTableId(rTable.id);
+              }
+            }
+          } else {
+            setCurrentRole('staff');
+            if (loggedUser.role === UserRole.KITCHEN) setStaffSubRole('kitchen');
+            else if (loggedUser.role === UserRole.CASHIER) setStaffSubRole('cashier');
+            else if (loggedUser.role === UserRole.MANAGER) setStaffSubRole('dashboard');
+            else if (loggedUser.role === UserRole.WAITER) setStaffSubRole('waiter');
+            
+            if (loggedUser.restaurantId) setSelectedRestaurantId(loggedUser.restaurantId);
+            if (loggedUser.branchId) {
+              setSelectedBranchId(loggedUser.branchId);
+              const rTable = tables.find((t) => t.branchId === loggedUser.branchId);
+              if (rTable) setSelectedTableId(rTable.id);
+            }
+          }
+
+          addSystemNotification(`🔑 Welcome back, ${loggedUser.fullName}! Logged in as [${loggedUser.role.toUpperCase()}] via profile fallback.`);
+          return { success: true };
+        } else {
+          return { success: false, error: 'Incorrect password.' };
+        }
+      }
+    } catch (err: any) {
+      console.warn("Direct database profile auth check failed:", err.message);
+    }
+
+    // secondary local fallback
     const user = users.find((u) => u.email.toLowerCase() === email.toLowerCase().trim());
     if (!user) {
-      return { success: false, error: 'User not found. Please register or verify the email.' };
+      return { success: false, error: authError?.message || 'User not found. Please register or verify the email.' };
     }
     if (user.password !== password) {
       return { success: false, error: 'Incorrect password.' };
@@ -2527,7 +2725,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       ...user,
       authorizedModules: getAuthorizedModulesForRole(user.role),
     };
-    setCurrentUser(userWithModules);
+    updateAndPersistCurrentUser(userWithModules);
 
     // Switch active workspace view role
     if (user.role === UserRole.SUPER_ADMIN) {
@@ -2545,7 +2743,6 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       }
     } else {
       setCurrentRole('staff');
-      // Set staff sub-role matching
       if (user.role === UserRole.KITCHEN) setStaffSubRole('kitchen');
       else if (user.role === UserRole.CASHIER) setStaffSubRole('cashier');
       else if (user.role === UserRole.MANAGER) setStaffSubRole('dashboard');
@@ -2614,8 +2811,19 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
           status: 'active',
         };
 
-        setUsers((prev) => [...prev, newUser]);
-        setCurrentUser(newUser);
+        // Sync registration to profiles table in Supabase
+        supabase.from('profiles').insert([{
+          id: data.user.id,
+          full_name: params.ownerName,
+          email: params.email.toLowerCase().trim(),
+          phone: params.phone,
+          role: 'restaurant_admin',
+          status: 'active',
+          profile_image: `pwd:${params.password || 'password123'}`
+        }]).then();
+
+        updateAndPersistUsers((prev) => [...prev, newUser]);
+        updateAndPersistCurrentUser(newUser);
         setCurrentRole('admin');
 
         addSystemNotification(`📝 Created account for ${params.ownerName}. Please verify your email.`);
@@ -2639,8 +2847,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       password: params.password || 'password123',
     };
 
-    setUsers((prev) => [...prev, newUser]);
-    setCurrentUser(newUser);
+    updateAndPersistUsers((prev) => [...prev, newUser]);
+    updateAndPersistCurrentUser(newUser);
     setCurrentRole('admin');
     
     addSystemNotification(`📝 Created account for ${params.ownerName}. Please verify your email.`);
@@ -2652,7 +2860,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     if (currentUser && !currentUser.id.startsWith('user_')) {
       supabase.auth.signOut().then();
     }
-    setCurrentUser(null);
+    updateAndPersistCurrentUser(null);
     setCurrentRole('customer');
     addSystemNotification(`👋 Logged out successfully. Good bye, ${name}!`);
   };
@@ -2660,8 +2868,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const updateOnboardingStep = (step: number) => {
     if (!currentUser) return;
     const updated = { ...currentUser, onboardingStep: step };
-    setCurrentUser(updated);
-    setUsers((prev) => prev.map((u) => (u.id === currentUser.id ? updated : u)));
+    updateAndPersistCurrentUser(updated);
+    updateAndPersistUsers((prev) => prev.map((u) => (u.id === currentUser.id ? updated : u)));
     if (!currentUser.id.startsWith('user_')) {
       supabase.auth.updateUser({ data: { onboardingStep: step } }).then();
     }
@@ -2670,18 +2878,18 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const verifyOnboardingEmail = () => {
     if (!currentUser) return;
     const updated = { ...currentUser, isVerified: true, onboardingStep: 2 };
-    setCurrentUser(updated);
-    setUsers((prev) => prev.map((u) => (u.id === currentUser.id ? updated : u)));
+    updateAndPersistCurrentUser(updated);
+    updateAndPersistUsers((prev) => prev.map((u) => (u.id === currentUser.id ? updated : u)));
     if (!currentUser.id.startsWith('user_')) {
       supabase.auth.updateUser({ data: { isVerified: true, onboardingStep: 2 } }).then();
     }
     addSystemNotification('📧 Email address successfully verified!');
   };
 
-  const onboardingSetupRestaurant = (params: Partial<Restaurant>) => {
-    if (!currentUser) return;
+  const onboardingSetupRestaurant = async (params: Partial<Restaurant>): Promise<{ success: boolean; error?: string }> => {
+    if (!currentUser) return { success: false, error: 'No active user session.' };
     
-    const restId = `rest_${Date.now()}`;
+    const restId = toUUID(`rest_${Date.now()}`);
     const newRest: Restaurant = {
       id: restId,
       name: params.name || 'My Restaurant',
@@ -2703,46 +2911,72 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       businessHours: '11:00 AM - 11:00 PM',
     };
 
-    setRestaurants((prev) => [...prev, newRest]);
-    setSelectedRestaurantId(restId);
+    try {
+      // 1. Insert the restaurant tenant first (essential for foreign keys)
+      const { error: restErr } = await supabase.from('restaurants').insert([{
+        id: restId,
+        name: newRest.name,
+        description: newRest.description,
+        logo: newRest.logo,
+        banner: newRest.banner,
+        status: newRest.status,
+        subscription_plan: newRest.plan,
+        rating: newRest.rating,
+        cuisine: newRest.cuisine,
+        primary_color: newRest.primaryColor,
+        accent_color: newRest.accentColor,
+        currency: newRest.currency,
+        gst_percent: newRest.gstPercent,
+        service_charge_percent: newRest.serviceChargePercent,
+        phone: newRest.phone,
+        email: newRest.email,
+        address: newRest.address,
+        business_hours: newRest.businessHours,
+        owner_name: currentUser.fullName
+      }]);
 
-    const updated = { ...currentUser, restaurantId: restId, onboardingStep: 3 };
-    setCurrentUser(updated);
-    setUsers((prev) => prev.map((u) => (u.id === currentUser.id ? updated : u)));
+      if (restErr) {
+        console.error("Supabase restaurant setup error:", restErr);
+        addSystemNotification(`❌ DB Error setting up restaurant: ${restErr.message}`);
+        return { success: false, error: `Database insert failed: ${restErr.message}` };
+      }
 
-    if (!currentUser.id.startsWith('user_')) {
-      supabase.auth.updateUser({ data: { restaurantId: restId, onboardingStep: 3 } }).then();
+      // 2. Link the new restaurant to user's profile and auth metadata
+      if (!currentUser.id.startsWith('user_')) {
+        const { error: profileErr } = await supabase.from('profiles').update({ restaurant_id: restId }).eq('id', currentUser.id);
+        if (profileErr) {
+          console.error("Supabase link restaurant to profile error:", profileErr);
+          addSystemNotification(`⚠️ Warning: Profiles link failed: ${profileErr.message}`);
+        }
+
+        const { error: authErr } = await supabase.auth.updateUser({ data: { restaurantId: restId, onboardingStep: 3 } });
+        if (authErr) {
+          console.warn("Supabase auth user_metadata update warning:", authErr.message);
+        }
+      }
+
+      // 3. Update React States only after DB success
+      setRestaurants((prev) => [...prev, newRest]);
+      setSelectedRestaurantId(restId);
+
+      const updated = { ...currentUser, restaurantId: restId, onboardingStep: 3 };
+      updateAndPersistCurrentUser(updated);
+      updateAndPersistUsers((prev) => prev.map((u) => (u.id === currentUser.id ? updated : u)));
+
+      addSystemNotification(`🏛️ Created restaurant tenant: ${newRest.name}`);
+      return { success: true };
+    } catch (err: any) {
+      console.error("onboardingSetupRestaurant exception:", err);
+      addSystemNotification(`❌ Unexpected error: ${err.message || err}`);
+      return { success: false, error: err.message || 'An unexpected error occurred.' };
     }
-
-    // Save to Supabase
-    supabase.from('restaurants').insert([{
-      id: restId,
-      name: newRest.name,
-      description: newRest.description,
-      logo: newRest.logo,
-      banner: newRest.banner,
-      status: newRest.status,
-      plan: newRest.plan,
-      rating: newRest.rating,
-      cuisine: newRest.cuisine,
-      primary_color: newRest.primaryColor,
-      accent_color: newRest.accentColor,
-      currency: newRest.currency,
-      gst_percent: newRest.gstPercent,
-      service_charge_percent: newRest.serviceChargePercent,
-      phone: newRest.phone,
-      email: newRest.email,
-      address: newRest.address,
-      business_hours: newRest.businessHours
-    }]).then();
-
-    addSystemNotification(`🏛️ Created restaurant tenant: ${newRest.name}`);
   };
 
-  const onboardingSetupBranch = (name: string, address: string, phone: string) => {
-    if (!currentUser || !currentUser.restaurantId) return;
+  const onboardingSetupBranch = async (name: string, address: string, phone: string): Promise<{ success: boolean; error?: string }> => {
+    if (!currentUser) return { success: false, error: 'No active user session.' };
+    if (!currentUser.restaurantId) return { success: false, error: 'Restaurant ID is not linked to your account.' };
 
-    const bId = `branch_${Date.now()}`;
+    const bId = toUUID(`branch_${Date.now()}`);
     const newBranch: Branch = {
       id: bId,
       restaurantId: currentUser.restaurantId,
@@ -2752,36 +2986,63 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       isActive: true,
     };
 
-    setBranches((prev) => [...prev, newBranch]);
-    setSelectedBranchId(bId);
+    try {
+      // 1. Insert the branch into database first
+      const { error: branchErr } = await supabase.from('branches').insert([{
+        id: bId,
+        restaurant_id: currentUser.restaurantId,
+        name,
+        address,
+        phone,
+        status: 'active'
+      }]);
 
-    const updated = { ...currentUser, branchId: bId, onboardingStep: 4 };
-    setCurrentUser(updated);
-    setUsers((prev) => prev.map((u) => (u.id === currentUser.id ? updated : u)));
+      if (branchErr) {
+        console.error("Supabase branch setup error:", branchErr);
+        addSystemNotification(`❌ DB Error setting up branch: ${branchErr.message}`);
+        return { success: false, error: `Database insert failed: ${branchErr.message}` };
+      }
 
-    if (!currentUser.id.startsWith('user_')) {
-      supabase.auth.updateUser({ data: { branchId: bId, onboardingStep: 4 } }).then();
+      // 2. Link branch to profiles and auth metadata
+      if (!currentUser.id.startsWith('user_')) {
+        const { error: profileErr } = await supabase.from('profiles').update({ branch_id: bId }).eq('id', currentUser.id);
+        if (profileErr) {
+          console.error("Supabase link branch to profile error:", profileErr);
+          addSystemNotification(`⚠️ Warning: Profiles link failed: ${profileErr.message}`);
+        }
+
+        const { error: authErr } = await supabase.auth.updateUser({ data: { branchId: bId, onboardingStep: 5 } });
+        if (authErr) {
+          console.warn("Supabase auth user_metadata update warning:", authErr.message);
+        }
+      }
+
+      // 3. Update React States
+      setBranches((prev) => [...prev, newBranch]);
+      setSelectedBranchId(bId);
+
+      const updated = { ...currentUser, branchId: bId, onboardingStep: 5 };
+      updateAndPersistCurrentUser(updated);
+      updateAndPersistUsers((prev) => prev.map((u) => (u.id === currentUser.id ? updated : u)));
+
+      addSystemNotification(`📍 Created branch: ${name}`);
+      return { success: true };
+    } catch (err: any) {
+      console.error("onboardingSetupBranch exception:", err);
+      addSystemNotification(`❌ Unexpected error: ${err.message || err}`);
+      return { success: false, error: err.message || 'An unexpected error occurred.' };
     }
-
-    // Save to Supabase
-    supabase.from('branches').insert([{
-      id: bId,
-      restaurant_id: currentUser.restaurantId,
-      name,
-      address,
-      phone,
-      is_active: true
-    }]).then();
-
-    addSystemNotification(`📍 Created branch: ${name}`);
   };
 
-  const onboardingSetupTables = (count: number) => {
-    if (!currentUser || !currentUser.restaurantId || !currentUser.branchId) return;
+  const onboardingSetupTables = async (count: number): Promise<{ success: boolean; error?: string }> => {
+    if (!currentUser) return { success: false, error: 'No active user session.' };
+    if (!currentUser.restaurantId || !currentUser.branchId) {
+      return { success: false, error: 'Restaurant ID or Branch ID is missing from your profile.' };
+    }
 
     const newTables: RestaurantTable[] = [];
     for (let i = 1; i <= count; i++) {
-      const tableId = `table_${Date.now()}_${i}`;
+      const tableId = toUUID(`table_${Date.now()}_${i}`);
       newTables.push({
         id: tableId,
         branchId: currentUser.branchId,
@@ -2793,35 +3054,52 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       });
     }
 
-    setTables((prev) => [...prev, ...newTables]);
-    if (newTables.length > 0) {
-      setSelectedTableId(newTables[0].id);
+    try {
+      // 1. Insert tables into Supabase
+      const { error: tablesErr } = await supabase.from('restaurant_tables').insert(newTables.map(t => ({
+        id: t.id,
+        branch_id: t.branchId,
+        restaurant_id: t.restaurantId,
+        table_name: t.tableNumber,
+        capacity: t.seatingCapacity,
+        status: 'Available',
+        permanent_qr_token: t.id
+      })));
+
+      if (tablesErr) {
+        console.error("Supabase tables generation error:", tablesErr);
+        addSystemNotification(`❌ DB Error generating tables: ${tablesErr.message}`);
+        return { success: false, error: `Database insert failed: ${tablesErr.message}` };
+      }
+
+      // 2. Update auth metadata step
+      if (!currentUser.id.startsWith('user_')) {
+        const { error: authErr } = await supabase.auth.updateUser({ data: { onboardingStep: 5 } });
+        if (authErr) {
+          console.warn("Supabase auth user_metadata update warning:", authErr.message);
+        }
+      }
+
+      // 3. Update React states
+      setTables((prev) => [...prev, ...newTables]);
+      if (newTables.length > 0) {
+        setSelectedTableId(newTables[0].id);
+      }
+
+      const updated = { ...currentUser, onboardingStep: 5 };
+      updateAndPersistCurrentUser(updated);
+      updateAndPersistUsers((prev) => prev.map((u) => (u.id === currentUser.id ? updated : u)));
+
+      addSystemNotification(`🪑 Successfully generated ${count} digital table QR codes!`);
+      return { success: true };
+    } catch (err: any) {
+      console.error("onboardingSetupTables exception:", err);
+      addSystemNotification(`❌ Unexpected error: ${err.message || err}`);
+      return { success: false, error: err.message || 'An unexpected error occurred.' };
     }
-
-    const updated = { ...currentUser, onboardingStep: 5 };
-    setCurrentUser(updated);
-    setUsers((prev) => prev.map((u) => (u.id === currentUser.id ? updated : u)));
-
-    if (!currentUser.id.startsWith('user_')) {
-      supabase.auth.updateUser({ data: { onboardingStep: 5 } }).then();
-    }
-
-    // Sync to Supabase
-    supabase.from('tables').insert(newTables.map(t => ({
-      id: t.id,
-      branch_id: t.branchId,
-      restaurant_id: t.restaurantId,
-      table_number: t.tableNumber,
-      seating_capacity: t.seatingCapacity,
-      status: 'available',
-      qr_url: t.qrUrl,
-      is_active: true
-    }))).then();
-
-    addSystemNotification(`🪑 Successfully generated ${count} digital table QR codes!`);
   };
 
-  const addStaffMember = (
+  const addStaffMember = async (
     fullName: string,
     email: string,
     role: string,
@@ -2839,8 +3117,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       return { success: false, error: 'Email address already registered.' };
     }
 
+    const tempId = `user_${Date.now()}`;
     const newStaff: UserProfile = {
-      id: `user_${Date.now()}`,
+      id: tempId,
       email: email.toLowerCase().trim(),
       fullName,
       phone,
@@ -2854,18 +3133,99 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       status,
     };
 
-    setUsers((prev) => [...prev, newStaff]);
+    updateAndPersistUsers((prev) => [...prev, newStaff]);
     addSystemNotification(`👤 Added staff member: ${fullName} (${role.toUpperCase()})`);
+
+    try {
+      // Create a secondary client for silent auth signup (so we don't disrupt current admin session)
+      const tempClient = createClient(
+        import.meta.env.VITE_SUPABASE_URL || '',
+        import.meta.env.VITE_SUPABASE_ANON_KEY || '',
+        { auth: { persistSession: false } }
+      );
+
+      const { data, error } = await tempClient.auth.signUp({
+        email: email.toLowerCase().trim(),
+        password,
+        options: {
+          data: {
+            fullName,
+            role,
+            restaurantId: currentUser.restaurantId,
+            branchId,
+            onboardingStep: 5
+          }
+        }
+      });
+
+      if (error) {
+        console.warn("Staff Supabase signup (Auth) failed, trying direct profile table insert fallback:", error.message);
+        
+        const directId = toUUID(tempId);
+        const { error: profileErr } = await supabase.from('profiles').insert([{
+          id: directId,
+          full_name: fullName,
+          email: email.toLowerCase().trim(),
+          phone,
+          role,
+          restaurant_id: currentUser.restaurantId,
+          branch_id: branchId,
+          status,
+          profile_image: `pwd:${password}`
+        }]);
+
+        if (profileErr) {
+          console.error("Direct staff profile insert failed:", profileErr.message);
+          return { success: false, error: `Auth error: ${error.message}. DB error: ${profileErr.message}` };
+        }
+
+        updateAndPersistUsers((prev) =>
+          prev.map((u) => (u.id === tempId ? { ...u, id: directId } : u))
+        );
+        addSystemNotification(`👤 Added staff member: ${fullName} directly to database`);
+        return { success: true };
+      }
+
+      if (data.user) {
+        const finalId = data.user.id;
+        // Insert into database profiles table
+        const { error: profileErr } = await supabase.from('profiles').insert([{
+          id: finalId,
+          full_name: fullName,
+          email: email.toLowerCase().trim(),
+          phone,
+          role,
+          restaurant_id: currentUser.restaurantId,
+          branch_id: branchId,
+          status,
+          profile_image: `pwd:${password}`
+        }]);
+
+        if (profileErr) {
+          console.error("Staff profile db insert error:", profileErr.message);
+          return { success: false, error: `Database insert failed: ${profileErr.message}` };
+        }
+
+        // Update the temporary ID with the actual UUID returned by Supabase
+        updateAndPersistUsers((prev) =>
+          prev.map((u) => (u.id === tempId ? { ...u, id: finalId } : u))
+        );
+      }
+    } catch (err: any) {
+      console.error("Staff creation exception:", err.message);
+      return { success: false, error: err.message || 'An unexpected error occurred.' };
+    }
+
     return { success: true };
   };
 
   const updateStaffMember = (id: string, updates: Partial<UserProfile>) => {
-    setUsers((prev) =>
+    updateAndPersistUsers((prev) =>
       prev.map((u) => {
         if (u.id === id) {
           const updated = { ...u, ...updates };
           if (currentUser && currentUser.id === id) {
-            setCurrentUser(updated);
+            updateAndPersistCurrentUser(updated);
           }
           return updated;
         }
@@ -2873,11 +3233,27 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       })
     );
     addSystemNotification(`👤 Staff member details updated.`);
+
+    // Persist to profiles table in Supabase
+    const profileUpdates: any = {
+      full_name: updates.fullName,
+      phone: updates.phone,
+      role: updates.role,
+      branch_id: updates.branchId,
+      status: updates.status
+    };
+    if (updates.password) {
+      profileUpdates.profile_image = `pwd:${updates.password}`;
+    }
+    supabase.from('profiles').update(profileUpdates).eq('id', id).then();
   };
 
   const deleteStaffMember = (id: string) => {
-    setUsers((prev) => prev.filter((u) => u.id !== id));
+    updateAndPersistUsers((prev) => prev.filter((u) => u.id !== id));
     addSystemNotification('👤 Staff member removed.');
+
+    // Delete from profiles table in Supabase
+    supabase.from('profiles').delete().eq('id', id).then();
   };
 
   return (
@@ -2920,6 +3296,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         setSelectedBranchId,
         setSelectedTableId,
         setIsQrModalOpen,
+        setTables,
+        setTableSessions,
+        setOrders,
         
         customerScanQR,
         customerEnterDetails,

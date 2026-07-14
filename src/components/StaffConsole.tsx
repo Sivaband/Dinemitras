@@ -5,6 +5,7 @@
 
 import React, { useState } from 'react';
 import { useAppState } from '../state';
+import { supabase } from '../supabaseClient';
 import {
   ChefHat,
   Bell,
@@ -20,6 +21,8 @@ import {
   Utensils,
   CreditCard,
   User,
+  Users,
+  ArrowLeftRight,
   Zap,
   CheckCircle2,
   AlertCircle,
@@ -79,8 +82,16 @@ export default function StaffConsole() {
     menuItems,
     menuCategories,
     staffAddItemsToBill,
-    staffUpdateOrderItemQuantity
+    staffUpdateOrderItemQuantity,
+    tableSessions,
+    setTableSessions,
+    setTables,
+    setOrders,
+    selectedBranchId,
+    customerRequestService
   } = useAppState();
+
+  const activeBranchId = selectedBranchId || currentUser?.branchId;
 
   const [isAddItemsOpen, setIsAddItemsOpen] = useState(false);
   const [addSearchQuery, setAddSearchQuery] = useState('');
@@ -97,6 +108,164 @@ export default function StaffConsole() {
   const [activeBillSettleSessionId, setActiveBillSettleSessionId] = useState<string | null>(null);
   const [cashierPayMethod, setCashierPayMethod] = useState<PaymentMethod>(PaymentMethod.UPI);
   const [settledInvoice, setSettledInvoice] = useState<any>(null);
+
+  // Waiter Manual Order Module States
+  const [waiterTab, setWaiterTab] = useState<'alerts' | 'manual'>('alerts');
+  const [waiterSearchQuery, setWaiterSearchQuery] = useState('');
+  const [waiterSelectedTable, setWaiterSelectedTable] = useState<any | null>(null);
+  const [waiterActiveSession, setWaiterActiveSession] = useState<any | null>(null);
+  const [waiterCart, setWaiterCart] = useState<{ id: string; item: any; quantity: number; selectedVariant?: any; selectedAddons: any[]; specialInstructions?: string }[]>([]);
+  const [waiterSearchMenuQuery, setWaiterSearchMenuQuery] = useState('');
+  const [waiterSelectedCategory, setWaiterSelectedCategory] = useState<string | null>(null);
+  const [waiterIsVegOnly, setWaiterIsVegOnly] = useState(false);
+  const [viewOrdersTable, setViewOrdersTable] = useState<any | null>(null);
+  const [transferringFromTable, setTransferringFromTable] = useState<any | null>(null);
+  const [transferTargetTableId, setTransferTargetTableId] = useState<string>('');
+
+  // Analytics calculations for Waiter Manual Ordering
+  const waiterOrders = orders.filter(o => o.source === 'Waiter' || o.source === 'Waiter POS');
+  const qrOrdersCount = orders.filter(o => o.source === 'Customer QR').length;
+  const waiterOrdersCount = waiterOrders.length;
+  const cashierOrdersCount = orders.filter(o => o.source === 'Cashier' || o.source === 'Cashier POS' || o.source === 'Manager').length;
+
+  const waiterStatsMap: { [name: string]: { count: number; sales: number } } = {};
+  waiterOrders.forEach(o => {
+    const name = o.addedBy || 'Unknown Waiter';
+    if (!waiterStatsMap[name]) {
+      waiterStatsMap[name] = { count: 0, sales: 0 };
+    }
+    waiterStatsMap[name].count += 1;
+    waiterStatsMap[name].sales += o.totalAmount;
+  });
+
+  const waiterStatsList = Object.entries(waiterStatsMap).map(([name, stats]) => ({
+    name,
+    count: stats.count,
+    sales: stats.sales
+  })).sort((a, b) => b.sales - a.sales);
+
+  const totalWaiterSales = waiterOrders.reduce((sum, o) => sum + o.totalAmount, 0);
+  const uniqueWaitersCount = Object.keys(waiterStatsMap).length || 1;
+  const averageWaiterSales = totalWaiterSales / uniqueWaitersCount;
+  const topPerformingWaiter = waiterStatsList[0] || { name: 'None', count: 0, sales: 0 };
+
+  const handleSelectTableForOrder = async (table: any) => {
+    setWaiterSelectedTable(table);
+    
+    // Find active session
+    const activeSess = tableSessions.find(s => s.tableId === table.id && s.isActive);
+    if (activeSess) {
+      setWaiterActiveSession(activeSess);
+      setWaiterCart([]); // Cart starts empty for the new additions of this session
+      addSystemNotification(`📝 Continuing running session for Table ${table.tableNumber}`);
+    } else {
+      const newSessId = crypto.randomUUID();
+      const newSessToken = `token_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const guestName = `Guest @ T${table.tableNumber}`;
+      
+      try {
+        const { data: newSess, error } = await supabase
+          .from('table_sessions')
+          .insert([{
+            id: newSessId,
+            session_token: newSessToken,
+            table_id: table.id,
+            restaurant_id: selectedRestaurantId || table.restaurantId,
+            branch_id: table.branchId,
+            customer_name: guestName,
+            customer_phone: '',
+            status: 'Active',
+            payment_status: 'pending'
+          }])
+          .select()
+          .single();
+        if (error) throw error;
+
+        // Update table status to occupied
+        await supabase
+          .from('restaurant_tables')
+          .update({ status: 'Occupied' })
+          .eq('id', table.id);
+
+        const createdSess: any = {
+          id: newSess.id,
+          tableId: newSess.table_id,
+          restaurantId: newSess.restaurant_id,
+          branchId: newSess.branch_id,
+          customerName: newSess.customer_name || '',
+          customerPhone: newSess.customer_phone || '',
+          joinedAt: newSess.started_at,
+          startedAt: newSess.started_at,
+          endedAt: newSess.ended_at,
+          isActive: newSess.status === 'Active',
+          status: newSess.status,
+          paymentStatus: newSess.payment_status,
+          totalBill: 0
+        };
+
+        // Update local states
+        setTableSessions((prev) => [...prev, createdSess]);
+        setTables((prev) => prev.map((t) => t.id === table.id ? { ...t, status: 'Occupied' as any } : t));
+        setWaiterActiveSession(createdSess);
+        setWaiterCart([]);
+        addSystemNotification(`✨ Created new manual session for Table ${table.tableNumber}`);
+      } catch (err: any) {
+        console.error("Failed to create table session:", err.message);
+        addSystemNotification("⚠️ Failed to start table session: " + err.message);
+      }
+    }
+  };
+
+  const handleTransferTable = async (fromTableId: string, toTableId: string) => {
+    if (!fromTableId || !toTableId) return;
+
+    // Find active session for fromTable
+    const session = tableSessions.find(s => s.tableId === fromTableId && s.isActive);
+    if (!session) {
+      addSystemNotification("⚠️ No active session found to transfer.");
+      return;
+    }
+
+    const fromTbl = tables.find(t => t.id === fromTableId);
+    const toTbl = tables.find(t => t.id === toTableId);
+    if (!fromTbl || !toTbl) return;
+
+    try {
+      // 1. Update table_id in table_sessions in Supabase
+      const { error: sessErr } = await supabase
+        .from('table_sessions')
+        .update({ table_id: toTableId })
+        .eq('id', session.id);
+      if (sessErr) throw sessErr;
+
+      // 2. Update table_id in orders in Supabase
+      const { error: ordErr } = await supabase
+        .from('orders')
+        .update({ table_id: toTableId })
+        .eq('session_id', session.id);
+      if (ordErr) throw ordErr;
+
+      // 3. Update table status in restaurant_tables in Supabase
+      await supabase.from('restaurant_tables').update({ status: 'Available' }).eq('id', fromTableId);
+      await supabase.from('restaurant_tables').update({ status: 'Occupied' }).eq('id', toTableId);
+
+      // 4. Update local states
+      setTableSessions(prev => prev.map(s => s.id === session.id ? { ...s, tableId: toTableId } : s));
+      setOrders(prev => prev.map(o => o.sessionId === session.id ? { ...o, tableId: toTableId, tableNumber: toTbl.tableNumber } : o));
+      
+      setTables(prev => prev.map(t => {
+        if (t.id === fromTableId) return { ...t, status: 'Available' as any };
+        if (t.id === toTableId) return { ...t, status: 'Occupied' as any };
+        return t;
+      }));
+
+      addSystemNotification(`🔀 Transferred Table ${fromTbl.tableNumber} to Table ${toTbl.tableNumber} successfully!`);
+      setTransferringFromTable(null);
+    } catch (err: any) {
+      console.error("Failed to transfer table:", err.message);
+      addSystemNotification("⚠️ Transfer failed: " + err.message);
+    }
+  };
 
   React.useEffect(() => {
     const handlePopState = () => {
@@ -289,7 +458,7 @@ export default function StaffConsole() {
                   onClick={logout}
                   className="px-4 py-2.5 bg-rose-500 hover:bg-rose-600 text-slate-950 font-black rounded-xl text-xs transition cursor-pointer"
                 >
-                  Sign Out / Switch Account
+                  Log Out
                 </button>
               </div>
             </motion.div>
@@ -523,174 +692,1001 @@ export default function StaffConsole() {
         {/* ======================================= */}
         {/* PANEL: WAITER ALERTS & REQUEST RESOLVE */}
         {/* ======================================= */}
+        {/* ======================================= */}
+        {/* PANEL: WAITER ALERTS & MANUAL ORDERING */}
+        {/* ======================================= */}
         {staffSubRole === 'waiter' && (
           <div className="space-y-6">
-            <div>
-              <div className="flex items-center justify-between border-b border-slate-800 pb-2 mb-4">
-                <span className="text-xs font-bold text-rose-400 flex items-center gap-1.5">
-                  <Bell className="w-4 h-4 animate-bounce" />
-                  Active Table Assistance Alerts
-                </span>
-                <span className="text-[10px] text-slate-500 font-mono">
-                  Unresolved requests: {activeRequests.length}
-                </span>
+            
+            {/* Waiter Subrole Top Navigation Header */}
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800/85 pb-4">
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setWaiterTab('alerts')}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer border ${
+                    waiterTab === 'alerts'
+                      ? 'bg-rose-500/10 border-rose-500/30 text-rose-400 font-extrabold shadow-sm'
+                      : 'bg-transparent border-transparent text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Bell className="w-4 h-4" />
+                  <span>Alerts & Deliveries ({activeRequests.length})</span>
+                </button>
+                {currentUser?.role !== UserRole.CASHIER && (
+                  <button
+                    onClick={() => setWaiterTab('manual')}
+                    className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer border ${
+                      waiterTab === 'manual'
+                        ? 'bg-amber-500/10 border-amber-500/30 text-amber-400 font-extrabold shadow-sm'
+                        : 'bg-transparent border-transparent text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <ClipboardList className="w-4 h-4" />
+                    <span>Manual Ordering Module</span>
+                  </button>
+                )}
               </div>
-
-              {activeRequests.length === 0 ? (
-                <div className="text-center py-10 bg-[#11131e]/20 border border-dashed border-slate-800 rounded-2xl">
-                  <CheckCircle2 className="w-8 h-8 mx-auto text-emerald-500/20 mb-2" />
-                  <span className="text-xs text-slate-400 font-medium font-sans">All guest tables are happy!</span>
-                  <p className="text-[10px] text-slate-500 mt-1">Water, service calls, and bill requests will flash here.</p>
+              
+              {/* Waiter Performance Realtime Summary Card */}
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 bg-slate-900/60 border border-slate-850 px-4 py-2 rounded-xl text-[10px] font-mono text-slate-400 shadow-inner">
+                <div className="flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                  <span>Total Waiter Sales: <strong className="text-emerald-400">{formatIndianCurrency(totalWaiterSales, activeRest.currency)}</strong></span>
                 </div>
-              ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
-                  {activeRequests.map((req) => {
-                    let reqLabel = "Service Call";
-                    let ReqIcon = Coffee;
-                    let cardBg = "border-amber-500/20 bg-amber-500/5";
-
-                    if (req.type === ServiceRequestType.REQUEST_WATER) {
-                      reqLabel = "Water Bottle";
-                      ReqIcon = Droplet;
-                      cardBg = "border-blue-500/20 bg-blue-500/5";
-                    } else if (req.type === ServiceRequestType.REQUEST_TISSUE) {
-                      reqLabel = "Napkin Tissues";
-                      ReqIcon = Sparkles;
-                      cardBg = "border-slate-500/20 bg-slate-900/40";
-                    } else if (req.type === ServiceRequestType.REQUEST_BILL) {
-                      reqLabel = "POS FINAL BILL";
-                      ReqIcon = DollarSign;
-                      cardBg = "border-emerald-500/30 bg-emerald-500/5 animate-pulse";
-                    }
-
-                    return (
-                      <div key={req.id} className={`border p-4 rounded-2xl flex flex-col justify-between h-36 shadow-md ${cardBg}`}>
-                        <div>
-                          <div className="flex justify-between items-center border-b border-slate-800/60 pb-1.5 mb-2 font-mono text-[9px] text-slate-500">
-                            <span>ALERT #{req.id.substr(-4)}</span>
-                            <span>{new Date(req.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                          </div>
-
-                          <div className="flex items-center gap-2">
-                            <ReqIcon className="w-5 h-5 text-amber-400" />
-                            <div>
-                              <span className="text-xs font-black text-white block">Table {req.tableNumber}</span>
-                              <span className="text-[10px] text-slate-400 font-semibold">{reqLabel}</span>
-                            </div>
-                          </div>
-                        </div>
-
-                        <button
-                          onClick={() => waiterResolveRequest(req.id)}
-                          className="w-full bg-slate-800 hover:bg-emerald-500 hover:text-slate-950 font-extrabold py-2 rounded-xl text-[10px] cursor-pointer transition-all duration-200"
-                        >
-                          Resolve Call
-                        </button>
-                      </div>
-                    );
-                  })}
+                <span className="text-slate-800 hidden sm:inline">|</span>
+                <div>
+                  <span>Avg Sales/Waiter: <strong className="text-amber-400">{formatIndianCurrency(averageWaiterSales, activeRest.currency)}</strong></span>
                 </div>
-              )}
+                <span className="text-slate-800 hidden sm:inline">|</span>
+                <div>
+                  <span>Top Performing: <strong className="text-indigo-400">{topPerformingWaiter.name}</strong></span>
+                </div>
+              </div>
             </div>
 
-            {/* Table Serving & Delivery Tracker (Ready & Served status) */}
-            <div>
-              <div className="flex items-center justify-between border-b border-slate-800 pb-2 mb-4">
-                <span className="text-xs font-bold text-amber-400 flex items-center gap-1.5">
-                  <Utensils className="w-4 h-4 text-amber-400" />
-                  Table Serving & Delivery Tracker (Active Orders)
-                </span>
-                <span className="text-[10px] text-slate-500 font-mono">
-                  Ready & Served: {restOrders.filter(o => o.status === OrderStatus.READY || o.status === OrderStatus.SERVED).length}
-                </span>
-              </div>
+            {waiterTab === 'alerts' ? (
+              // ============================================
+              // WAITER SUB-TAB 1: ALERTS & DELIVERY TRACKER
+              // ============================================
+              <div className="space-y-6">
+                <div>
+                  <div className="flex items-center justify-between border-b border-slate-850 pb-2 mb-4">
+                    <span className="text-xs font-bold text-rose-400 flex items-center gap-1.5">
+                      <Bell className="w-4 h-4 animate-bounce" />
+                      Active Table Assistance Alerts
+                    </span>
+                    <span className="text-[10px] text-slate-500 font-mono">
+                      Unresolved requests: {activeRequests.length}
+                    </span>
+                  </div>
 
-              {restOrders.filter(o => o.status === OrderStatus.READY || o.status === OrderStatus.SERVED).length === 0 ? (
-                <div className="text-center py-12 bg-[#11131e]/10 border border-dashed border-slate-850 rounded-2xl">
-                  <Utensils className="w-8 h-8 mx-auto text-slate-700 opacity-30 mb-2" />
-                  <span className="text-xs text-slate-550 font-semibold">No active deliveries pending!</span>
-                  <p className="text-[10px] text-slate-500 mt-1">Orders marked as ready by kitchen or currently served will display here.</p>
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                  {restOrders
-                    .filter(o => o.status === OrderStatus.READY || o.status === OrderStatus.SERVED)
-                    .map((order) => {
-                      const isReady = order.status === OrderStatus.READY;
-                      const isServed = order.status === OrderStatus.SERVED;
+                  {activeRequests.length === 0 ? (
+                    <div className="text-center py-10 bg-[#11131e]/20 border border-dashed border-slate-800 rounded-2xl">
+                      <CheckCircle2 className="w-8 h-8 mx-auto text-emerald-500/20 mb-2" />
+                      <span className="text-xs text-slate-400 font-medium font-sans">All guest tables are happy!</span>
+                      <p className="text-[10px] text-slate-500 mt-1">Water, service calls, and bill requests will flash here.</p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
+                      {activeRequests.map((req) => {
+                        let reqLabel = "Service Call";
+                        let ReqIcon = Coffee;
+                        let cardBg = "border-amber-500/20 bg-amber-500/5";
 
-                      return (
-                        <div
-                          key={order.id}
-                          className={`border p-4 rounded-2xl flex flex-col justify-between shadow-md transition-all ${
-                            isReady
-                              ? 'border-amber-500/30 bg-amber-500/5 animate-pulse'
-                              : 'border-indigo-500/30 bg-slate-900/20'
-                          }`}
-                        >
-                          <div>
-                            <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 mb-2.5">
-                              <span className="bg-slate-800 text-white font-extrabold text-xs px-2.5 py-0.5 rounded-lg">
-                                Table {order.tableNumber}
-                              </span>
-                              <span className="text-[10px] text-slate-500 font-mono">#{order.id.substr(-4)}</span>
-                            </div>
+                        if (req.type === ServiceRequestType.REQUEST_WATER) {
+                          reqLabel = "Water Bottle";
+                          ReqIcon = Droplet;
+                          cardBg = "border-blue-500/20 bg-blue-500/5";
+                        } else if (req.type === ServiceRequestType.REQUEST_TISSUE) {
+                          reqLabel = "Napkin Tissues";
+                          ReqIcon = Sparkles;
+                          cardBg = "border-slate-500/20 bg-slate-900/40";
+                        } else if (req.type === ServiceRequestType.REQUEST_BILL) {
+                          reqLabel = "POS FINAL BILL";
+                          ReqIcon = DollarSign;
+                          cardBg = "border-emerald-500/30 bg-emerald-500/5 animate-pulse";
+                        }
 
-                            <div className="space-y-1.5 mb-4">
-                              {order.items.map((it) => (
-                                <div key={it.id} className="text-xs flex justify-between">
-                                  <span className="text-slate-300 font-bold">
-                                    {it.quantity}x {it.name}
-                                  </span>
-                                  {it.selectedVariant && (
-                                    <span className="text-[10px] text-amber-500 font-mono">({it.selectedVariant.name})</span>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-
-                          <div className="flex items-center justify-between gap-3 pt-2.5 border-t border-slate-800/80">
+                        return (
+                          <div key={req.id} className={`border p-4 rounded-2xl flex flex-col justify-between h-36 shadow-md ${cardBg}`}>
                             <div>
-                              <span className="text-[9px] font-bold uppercase tracking-wider block text-slate-400">STATUS</span>
-                              <span
-                                className={`text-[10px] font-black uppercase font-mono ${
-                                  isReady ? 'text-amber-400' : 'text-indigo-400'
-                                }`}
-                              >
-                                {isReady ? '🍳 Ready for Table' : '✅ Served to Table'}
-                              </span>
+                              <div className="flex justify-between items-center border-b border-slate-800/60 pb-1.5 mb-2 font-mono text-[9px] text-slate-500">
+                                <span>ALERT #{req.id.substr(-4)}</span>
+                                <span>{new Date(req.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                <ReqIcon className="w-5 h-5 text-amber-400" />
+                                <div>
+                                  <span className="text-xs font-black text-white block">Table {req.tableNumber}</span>
+                                  <span className="text-[10px] text-slate-400 font-semibold">{reqLabel}</span>
+                                </div>
+                              </div>
                             </div>
 
-                            {isReady ? (
+                            <button
+                              onClick={() => waiterResolveRequest(req.id)}
+                              className="w-full bg-slate-800 hover:bg-emerald-500 hover:text-slate-950 font-extrabold py-2 rounded-xl text-[10px] cursor-pointer transition-all duration-200"
+                            >
+                              Resolve Call
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between border-b border-slate-850 pb-2 mb-4">
+                    <span className="text-xs font-bold text-amber-400 flex items-center gap-1.5">
+                      <Utensils className="w-4 h-4 text-amber-400" />
+                      Table Serving & Delivery Tracker (Active Orders)
+                    </span>
+                    <span className="text-[10px] text-slate-500 font-mono">
+                      Ready & Served: {restOrders.filter(o => o.status === OrderStatus.READY || o.status === OrderStatus.SERVED).length}
+                    </span>
+                  </div>
+
+                  {restOrders.filter(o => o.status === OrderStatus.READY || o.status === OrderStatus.SERVED).length === 0 ? (
+                    <div className="text-center py-12 bg-[#11131e]/10 border border-dashed border-slate-850 rounded-2xl">
+                      <Utensils className="w-8 h-8 mx-auto text-slate-700 opacity-30 mb-2" />
+                      <span className="text-xs text-slate-500 font-semibold">No active deliveries pending!</span>
+                      <p className="text-[10px] text-slate-500 mt-1">Orders marked as ready by kitchen or currently served will display here.</p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                      {restOrders
+                        .filter(o => o.status === OrderStatus.READY || o.status === OrderStatus.SERVED)
+                        .map((order) => {
+                          const isReady = order.status === OrderStatus.READY;
+
+                          return (
+                            <div
+                              key={order.id}
+                              className={`border p-4 rounded-2xl flex flex-col justify-between shadow-md transition-all ${
+                                isReady
+                                  ? 'border-amber-500/30 bg-amber-500/5 animate-pulse'
+                                  : 'border-indigo-500/30 bg-slate-900/20'
+                              }`}
+                            >
+                              <div>
+                                <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 mb-2.5">
+                                  <span className="bg-slate-800 text-white font-extrabold text-xs px-2.5 py-0.5 rounded-lg">
+                                    Table {order.tableNumber}
+                                  </span>
+                                  <span className="text-[10px] text-slate-500 font-mono">#{order.id.substr(-4)}</span>
+                                </div>
+
+                                <div className="space-y-1.5 mb-4">
+                                  {order.items.map((it) => (
+                                    <div key={it.id} className="text-xs flex justify-between">
+                                      <span className="text-slate-300 font-bold">
+                                        {it.quantity}x {it.name}
+                                      </span>
+                                      {it.selectedVariant && (
+                                        <span className="text-[10px] text-amber-500 font-mono">({it.selectedVariant.name})</span>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+
+                              <div className="flex items-center justify-between gap-3 pt-2.5 border-t border-slate-800/80">
+                                <div>
+                                  <span className="text-[9px] font-bold uppercase tracking-wider block text-slate-400">STATUS</span>
+                                  <span
+                                    className={`text-[10px] font-black uppercase font-mono ${
+                                      isReady ? 'text-amber-400' : 'text-indigo-400'
+                                    }`}
+                                  >
+                                    {isReady ? '🍳 Ready for Table' : '✅ Served to Table'}
+                                  </span>
+                                </div>
+
+                                {isReady ? (
+                                  <button
+                                    onClick={() => staffMarkServed(order.id)}
+                                    className="bg-amber-500 hover:bg-amber-600 text-slate-950 font-black px-3 py-1.5 rounded-lg text-[10px] cursor-pointer transition-all active:scale-95"
+                                  >
+                                    SERVE TO TABLE
+                                  </button>
+                                ) : (
+                                  <button
+                                    onClick={() => staffCompleteOrder(order.id)}
+                                    className="bg-slate-800 hover:bg-emerald-500 hover:text-slate-950 text-slate-300 font-black px-3 py-1.5 rounded-lg text-[10px] cursor-pointer transition-all"
+                                  >
+                                    MARK COMPLETE
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              // ============================================
+              // WAITER SUB-TAB 2: MANUAL ORDERING SYSTEM
+              // ============================================
+              <div className="space-y-6">
+                
+                {waiterSelectedTable ? (
+                  // 2A. ACTIVE POS ORDERING WORKSPACE (SPLIT SCREEN)
+                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                    
+                    {/* Left Column: Category & Item Selection Grid (8 Cols) */}
+                    <div className="lg:col-span-8 space-y-4">
+                      <div className="bg-[#11131e]/90 border border-slate-800/80 p-4 rounded-3xl space-y-3 shadow-md backdrop-blur-md">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <span className="text-[10px] text-amber-500 font-mono font-bold block uppercase tracking-wider">BROWSE SIZZLR MENU</span>
+                            <h3 className="text-sm font-black text-white">Select Items to Place Order</h3>
+                          </div>
+                          
+                          <button
+                            onClick={() => {
+                              if (waiterCart.length > 0 && !window.confirm("Abandon current items in cart?")) return;
+                              setWaiterSelectedTable(null);
+                              setWaiterActiveSession(null);
+                              setWaiterCart([]);
+                            }}
+                            className="bg-slate-800 hover:bg-slate-700 text-slate-300 px-3 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 cursor-pointer transition"
+                          >
+                            <ArrowLeft className="w-3.5 h-3.5" />
+                            <span>Exit Ordering</span>
+                          </button>
+                        </div>
+
+                        {/* Search and Category Filter controls */}
+                        <div className="space-y-3">
+                          <div className="relative">
+                            <Search className="absolute left-3.5 top-2.5 w-4 h-4 text-slate-500" />
+                            <input
+                              type="text"
+                              value={waiterSearchMenuQuery}
+                              onChange={(e) => setWaiterSearchMenuQuery(e.target.value)}
+                              placeholder="Search menu items by name, ingredients, description..."
+                              className="w-full bg-slate-950 border border-slate-850 focus:border-amber-500 rounded-xl py-2 pl-10 pr-4 text-xs text-white outline-none placeholder-slate-600"
+                            />
+                            {waiterSearchMenuQuery && (
                               <button
-                                onClick={() => staffMarkServed(order.id)}
-                                className="bg-amber-500 hover:bg-amber-600 text-slate-950 font-black px-3 py-1.5 rounded-lg text-[10px] cursor-pointer transition-all active:scale-95"
+                                onClick={() => setWaiterSearchMenuQuery('')}
+                                className="absolute right-3 top-2.5 p-0.5 text-slate-500 hover:text-white"
                               >
-                                SERVE TO TABLE
-                              </button>
-                            ) : (
-                              <button
-                                onClick={() => staffCompleteOrder(order.id)}
-                                className="bg-slate-800 hover:bg-emerald-500 hover:text-slate-950 text-slate-300 font-black px-3 py-1.5 rounded-lg text-[10px] cursor-pointer transition-all"
-                              >
-                                MARK COMPLETE
+                                <X className="w-3.5 h-3.5" />
                               </button>
                             )}
                           </div>
+
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-850 pt-2.5">
+                            <div className="flex gap-1.5 overflow-x-auto scrollbar-none py-0.5 max-w-full">
+                              <button
+                                onClick={() => setWaiterSelectedCategory(null)}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-bold shrink-0 cursor-pointer transition-all ${
+                                  waiterSelectedCategory === null
+                                    ? 'bg-amber-500 text-slate-950 shadow-sm'
+                                    : 'bg-slate-900 border border-slate-850 text-slate-400 hover:text-slate-200'
+                                }`}
+                              >
+                                All Categories
+                              </button>
+                              {menuCategories.map((cat) => (
+                                <button
+                                  key={cat.id}
+                                  onClick={() => setWaiterSelectedCategory(waiterSelectedCategory === cat.id ? null : cat.id)}
+                                  className={`px-3 py-1.5 rounded-lg text-xs font-bold shrink-0 cursor-pointer transition-all ${
+                                    waiterSelectedCategory === cat.id
+                                      ? 'bg-amber-500 text-slate-950 shadow-sm'
+                                      : 'bg-slate-900 border border-slate-850 text-slate-350 hover:text-slate-200'
+                                  }`}
+                                >
+                                  {cat.name}
+                                </button>
+                              ))}
+                            </div>
+
+                            <button
+                              onClick={() => setWaiterIsVegOnly(!waiterIsVegOnly)}
+                              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-all ${
+                                waiterIsVegOnly
+                                  ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 font-bold'
+                                  : 'bg-slate-900 border border-slate-850 text-slate-400 hover:text-slate-200'
+                              }`}
+                            >
+                              <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full" />
+                              <span>Veg Only</span>
+                            </button>
+                          </div>
                         </div>
-                      );
-                    })}
+                      </div>
+
+                      {/* Menu Grid */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                        {(() => {
+                          const filtered = menuItems.filter((item) => {
+                            const matchesSearch = item.name.toLowerCase().includes(waiterSearchMenuQuery.toLowerCase()) ||
+                              item.description.toLowerCase().includes(waiterSearchMenuQuery.toLowerCase());
+                            const matchesCategory = waiterSelectedCategory ? item.categoryId === waiterSelectedCategory : true;
+                            const matchesVeg = waiterIsVegOnly ? item.isVeg : true;
+                            return matchesSearch && matchesCategory && matchesVeg;
+                          });
+
+                          if (filtered.length === 0) {
+                            return (
+                              <div className="col-span-full text-center py-16 bg-slate-900/10 border border-dashed border-slate-850 rounded-3xl text-slate-500">
+                                <Utensils className="w-8 h-8 mx-auto text-slate-700 opacity-35 mb-2" />
+                                <span className="text-xs font-semibold">No food items found matching criteria.</span>
+                              </div>
+                            );
+                          }
+
+                          return filtered.map((item) => (
+                            <div
+                              key={item.id}
+                              className="bg-[#11131e]/60 border border-slate-850 p-3.5 rounded-2xl flex flex-col justify-between hover:border-slate-800 transition-all shadow-sm"
+                            >
+                              <div className="flex gap-2.5">
+                                <div className="w-16 h-16 rounded-xl overflow-hidden bg-slate-850 shrink-0 relative">
+                                  <img src={item.image} alt={item.name} className="w-full h-full object-cover" />
+                                  <span className={`absolute top-1 left-1 w-3.5 h-3.5 rounded-sm flex items-center justify-center p-0.5 border bg-slate-950/80 ${item.isVeg ? 'border-emerald-500' : 'border-rose-500'}`}>
+                                    <span className={`w-1.5 h-1.5 rounded-full ${item.isVeg ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+                                  </span>
+                                </div>
+                                <div className="min-w-0">
+                                  <h4 className="text-xs font-black text-white line-clamp-1">{item.name}</h4>
+                                  <p className="text-[9px] text-slate-400 line-clamp-2 mt-0.5 leading-normal">{item.description}</p>
+                                </div>
+                              </div>
+
+                              <div className="flex justify-between items-center mt-4 pt-3 border-t border-slate-850/65">
+                                <span className="text-xs font-black text-white font-mono">{formatIndianCurrency(item.price, activeRest.currency)}</span>
+                                <button
+                                  onClick={() => {
+                                    setCustomizingItem(item);
+                                    setSelectedVariantId(item.variants?.[0]?.id || '');
+                                    setSelectedAddonIds([]);
+                                    setSpecialInstructions('');
+                                    setCustomizingQty(1);
+                                  }}
+                                  className="bg-amber-500 hover:bg-amber-600 text-slate-950 px-3 py-1.5 rounded-lg text-[10px] font-black cursor-pointer transition active:scale-95 shadow"
+                                >
+                                  ADD TO ORDER
+                                </button>
+                              </div>
+                            </div>
+                          ));
+                        })()}
+                      </div>
+                    </div>
+
+                    {/* Right Column: POS Cart Builder & Bill summary (4 Cols) */}
+                    <div className="lg:col-span-4 bg-[#11131e]/80 border border-slate-800/80 rounded-3xl p-4 flex flex-col h-[75vh] justify-between shadow-2xl backdrop-blur-md sticky top-4">
+                      
+                      {/* Cart Header */}
+                      <div className="border-b border-slate-850 pb-3 mb-3 flex items-center justify-between">
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs bg-slate-800 text-amber-400 font-extrabold px-2 py-0.5 rounded-lg">
+                              Table {waiterSelectedTable.tableNumber}
+                            </span>
+                            <span className="text-[10px] text-slate-500 font-mono">Cart Builder</span>
+                          </div>
+                          <span className="text-[9px] text-slate-400 font-mono block mt-1">Session: {waiterActiveSession?.id?.substr(-8)} • {waiterActiveSession?.customerName}</span>
+                        </div>
+                        <span className="text-[9px] text-emerald-400 bg-emerald-950/45 px-2 py-0.5 rounded border border-emerald-900/30 uppercase font-mono font-bold animate-pulse">Waiter POS</span>
+                      </div>
+
+                      {/* Cart Items List */}
+                      <div className="flex-1 overflow-y-auto space-y-2.5 pr-1 scrollbar-thin">
+                        {waiterCart.map((cartItem) => {
+                          const itemPrice = cartItem.item.price + (cartItem.selectedVariant?.price || 0) + cartItem.selectedAddons.reduce((sa, a) => sa + a.price, 0);
+                          return (
+                            <div key={cartItem.id} className="bg-slate-950/60 border border-slate-850 p-2.5 rounded-xl space-y-2">
+                              <div className="flex justify-between items-start">
+                                <div className="min-w-0 flex-1">
+                                  <span className="text-xs font-bold text-slate-100 block truncate">{cartItem.item.name}</span>
+                                  {cartItem.selectedVariant && (
+                                    <span className="text-[9px] text-amber-500 font-bold uppercase block mt-0.5">Size: {cartItem.selectedVariant.name}</span>
+                                  )}
+                                  {cartItem.selectedAddons.length > 0 && (
+                                    <span className="text-[9px] text-slate-400 block truncate leading-relaxed mt-0.5">
+                                      + {cartItem.selectedAddons.map(a => a.name).join(', ')}
+                                    </span>
+                                  )}
+                                  {cartItem.specialInstructions && (
+                                    <span className="text-[9px] text-indigo-400 bg-indigo-950/20 px-1.5 py-0.5 border border-indigo-950 rounded block mt-1 truncate italic">
+                                      “{cartItem.specialInstructions}”
+                                    </span>
+                                  )}
+                                </div>
+                                <span className="text-xs font-black font-mono text-white pl-2 shrink-0">{formatIndianCurrency(itemPrice * cartItem.quantity, activeRest.currency)}</span>
+                              </div>
+
+                              <div className="flex justify-between items-center pt-2 border-t border-slate-900/60">
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    onClick={() => {
+                                      setWaiterCart(prev => prev.map(c => c.id === cartItem.id ? { ...c, quantity: Math.max(1, c.quantity - 1) } : c));
+                                    }}
+                                    className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white cursor-pointer"
+                                  >
+                                    <Minus className="w-3 h-3" />
+                                  </button>
+                                  <span className="text-xs font-bold font-mono text-white">{cartItem.quantity}</span>
+                                  <button
+                                    onClick={() => {
+                                      setWaiterCart(prev => prev.map(c => c.id === cartItem.id ? { ...c, quantity: c.quantity + 1 } : c));
+                                    }}
+                                    className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white cursor-pointer"
+                                  >
+                                    <Plus className="w-3 h-3" />
+                                  </button>
+                                </div>
+
+                                <button
+                                  onClick={() => setWaiterCart(prev => prev.filter(c => c.id !== cartItem.id))}
+                                  className="text-[10px] text-rose-450 hover:text-rose-400 font-bold cursor-pointer hover:bg-rose-950/15 p-1 rounded transition"
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+
+                        {waiterCart.length === 0 && (
+                          <div className="h-full flex flex-col items-center justify-center text-center py-16 text-slate-600 space-y-2">
+                            <ClipboardList className="w-10 h-10 text-slate-800" />
+                            <span className="text-xs font-semibold">Your order cart is empty.</span>
+                            <p className="text-[10px] text-slate-500 leading-normal max-w-[200px]">Select items from Sizzlr menu on the left to build the order.</p>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Calculations & Submit */}
+                      <div className="border-t border-slate-850 pt-3.5 space-y-3.5 mt-3 shrink-0">
+                        {(() => {
+                          const subtotal = waiterCart.reduce((acc, c) => {
+                            const itemPrice = c.item.price + (c.selectedVariant?.price || 0) + c.selectedAddons.reduce((sa, a) => sa + a.price, 0);
+                            return acc + itemPrice * c.quantity;
+                          }, 0);
+                          const gstAmount = parseFloat((subtotal * (activeRest.gstPercent / 100)).toFixed(2));
+                          const srvAmount = parseFloat((subtotal * (activeRest.serviceChargePercent / 100)).toFixed(2));
+                          const total = parseFloat((subtotal + gstAmount + srvAmount).toFixed(2));
+
+                          return (
+                            <>
+                              <div className="space-y-1.5 text-[11px] font-mono text-slate-400">
+                                <div className="flex justify-between">
+                                  <span>Subtotal:</span>
+                                  <span className="text-slate-200">{formatIndianCurrency(subtotal, activeRest.currency)}</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span>GST Tax ({activeRest.gstPercent}%):</span>
+                                  <span className="text-slate-200">+{formatIndianCurrency(gstAmount, activeRest.currency)}</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span>Service Charge ({activeRest.serviceChargePercent}%):</span>
+                                  <span className="text-slate-200">+{formatIndianCurrency(srvAmount, activeRest.currency)}</span>
+                                </div>
+                                <div className="flex justify-between text-xs font-black border-t border-slate-900 pt-2 text-white">
+                                  <span className="font-sans">Grand Total:</span>
+                                  <span className="text-amber-400 font-mono">{formatIndianCurrency(total, activeRest.currency)}</span>
+                                </div>
+                              </div>
+
+                              <button
+                                onClick={async () => {
+                                  if (waiterCart.length === 0) return;
+                                  try {
+                                    await staffAddItemsToBill(waiterActiveSession.id, waiterCart);
+                                    setWaiterCart([]);
+                                    setWaiterSelectedTable(null);
+                                    setWaiterActiveSession(null);
+                                    addSystemNotification(`✨ Order successfully sent to kitchen!`);
+                                  } catch (e: any) {
+                                    console.error("Failed to place manual order:", e);
+                                    addSystemNotification("⚠️ Order submit failed: " + e.message);
+                                  }
+                                }}
+                                disabled={waiterCart.length === 0}
+                                className={`w-full font-black py-3 rounded-xl text-xs text-center uppercase tracking-wider cursor-pointer shadow transition active:scale-95 ${
+                                  waiterCart.length > 0
+                                    ? 'bg-amber-500 hover:bg-amber-600 text-slate-950'
+                                    : 'bg-slate-800 text-slate-550 cursor-not-allowed'
+                                }`}
+                              >
+                                Submit Order to Kitchen
+                              </button>
+                            </>
+                          );
+                        })()}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  // 2B. TABLE SELECTION & MANAGEMENT GRID (WITH DETAILED CARDS & REALTIME BILLS)
+                  <div className="space-y-6">
+                    
+                    {/* Realtime Bento Grid Statistics */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                      
+                      {/* Grid Cell 1: Total Distribution */}
+                      <div className="bg-[#11131e]/50 border border-slate-850 p-4 rounded-2xl flex flex-col justify-between shadow-sm relative overflow-hidden">
+                        <div className="absolute top-0 right-0 p-4 opacity-10">
+                          <Zap className="w-16 h-16 text-indigo-400" />
+                        </div>
+                        <span className="text-[10px] text-slate-450 font-mono block uppercase tracking-wider font-bold">Active Orders Distribution</span>
+                        <div className="mt-3.5 space-y-2 text-xs">
+                          <div className="flex justify-between items-center text-slate-300">
+                            <span className="flex items-center gap-1.5 font-sans"><span className="w-1.5 h-1.5 bg-indigo-500 rounded-full" />📱 Customer QR:</span>
+                            <span className="font-mono font-bold text-white bg-slate-950 px-2 py-0.5 rounded border border-slate-850">{qrOrdersCount} orders</span>
+                          </div>
+                          <div className="flex justify-between items-center text-slate-300">
+                            <span className="flex items-center gap-1.5 font-sans"><span className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-pulse" />👨‍🍳 Waiter POS:</span>
+                            <span className="font-mono font-bold text-white bg-slate-950 px-2 py-0.5 rounded border border-slate-850">{waiterOrdersCount} orders</span>
+                          </div>
+                          <div className="flex justify-between items-center text-slate-300">
+                            <span className="flex items-center gap-1.5 font-sans"><span className="w-1.5 h-1.5 bg-emerald-500 rounded-full" />💵 Cashier POS:</span>
+                            <span className="font-mono font-bold text-white bg-slate-950 px-2 py-0.5 rounded border border-slate-850">{cashierOrdersCount} orders</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Grid Cell 2: Waiter Performance Avg */}
+                      <div className="bg-[#11131e]/50 border border-slate-850 p-4 rounded-2xl flex flex-col justify-between shadow-sm relative overflow-hidden">
+                        <div className="absolute top-0 right-0 p-4 opacity-10">
+                          <TrendingUp className="w-16 h-16 text-emerald-400" />
+                        </div>
+                        <span className="text-[10px] text-slate-450 font-mono block uppercase tracking-wider font-bold">Waiter Revenue & Velocity</span>
+                        <div className="mt-3 space-y-2 text-xs">
+                          <div className="flex justify-between text-slate-350">
+                            <span>Total Revenue Added:</span>
+                            <span className="font-mono font-bold text-emerald-400">{formatIndianCurrency(totalWaiterSales, activeRest.currency)}</span>
+                          </div>
+                          <div className="flex justify-between text-slate-350">
+                            <span>Active Waiters Grouped:</span>
+                            <span className="font-mono font-bold text-white">{uniqueWaitersCount} staff</span>
+                          </div>
+                          <div className="flex justify-between text-slate-350">
+                            <span>Avg Waiter Efficiency:</span>
+                            <span className="font-mono font-bold text-amber-400">{formatIndianCurrency(averageWaiterSales, activeRest.currency)}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Grid Cell 3: Live Waiter Leaderboard */}
+                      <div className="bg-[#11131e]/50 border border-slate-850 p-4 rounded-2xl flex flex-col justify-between shadow-sm relative overflow-hidden">
+                        <span className="text-[10px] text-slate-450 font-mono block uppercase tracking-wider font-bold">Waiter Performance Leaderboard</span>
+                        <div className="mt-2 space-y-1.5 max-h-24 overflow-y-auto pr-1 scrollbar-none">
+                          {waiterStatsList.slice(0, 3).map((w, idx) => (
+                            <div key={w.name} className="flex justify-between items-center text-xs">
+                              <div className="flex items-center gap-1.5">
+                                <span className={`w-4 h-4 rounded-full text-[8px] font-black flex items-center justify-center ${idx === 0 ? 'bg-amber-500 text-slate-950' : 'bg-slate-800 text-slate-400'}`}>{idx + 1}</span>
+                                <span className="font-semibold text-slate-300 truncate max-w-[120px]">{w.name}</span>
+                              </div>
+                              <span className="font-mono text-slate-400 text-[11px] font-bold">{formatIndianCurrency(w.sales, activeRest.currency)} ({w.count} ord)</span>
+                            </div>
+                          ))}
+                          {waiterStatsList.length === 0 && (
+                            <div className="text-center py-4 text-slate-600 font-mono text-[10px]">
+                              No waiter manual logs yet.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Table Filters & Live Search */}
+                    <div className="bg-[#11131e]/40 border border-slate-850 p-3.5 rounded-2xl">
+                      <div className="relative">
+                        <Search className="absolute left-3.5 top-2.5 w-4 h-4 text-slate-500" />
+                        <input
+                          type="text"
+                          value={waiterSearchQuery}
+                          onChange={(e) => setWaiterSearchQuery(e.target.value)}
+                          placeholder="Search branch tables by number (e.g. '04', '1')..."
+                          className="w-full bg-slate-950 border border-slate-850 focus:border-amber-500 rounded-xl py-2 pl-10 pr-4 text-xs text-white outline-none placeholder-slate-650"
+                        />
+                        {waiterSearchQuery && (
+                          <button
+                            onClick={() => setWaiterSearchQuery('')}
+                            className="absolute right-3 top-2.5 p-0.5 text-slate-550 hover:text-white"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Table Cards Grid */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
+                      {(() => {
+                        const filteredTables = tables.filter(t => 
+                          t.restaurantId === selectedRestaurantId &&
+                          (activeBranchId ? t.branchId === activeBranchId : true) &&
+                          t.tableNumber.toLowerCase().includes(waiterSearchQuery.toLowerCase())
+                        );
+
+                        if (filteredTables.length === 0) {
+                          return (
+                            <div className="col-span-full text-center py-16 bg-slate-900/10 border border-dashed border-slate-850 rounded-3xl text-slate-550">
+                              <Users className="w-8 h-8 mx-auto text-slate-700 opacity-30 mb-2" />
+                              <span className="text-xs font-semibold">No branch tables found.</span>
+                            </div>
+                          );
+                        }
+
+                        return filteredTables.map((tbl) => {
+                          const activeSess = tableSessions.find(s => s.tableId === tbl.id && s.isActive);
+                          // Compute dynamic current bill based on all orders placed in this table session
+                          const sessionOrders = orders.filter((o) => o.sessionId === activeSess?.id && o.status !== OrderStatus.CANCELLED);
+                          const currentBill = sessionOrders.reduce((acc, o) => acc + o.totalAmount, 0);
+
+                          let statusBg = 'border-slate-850 bg-slate-950/40 text-slate-400';
+                          let statusLabel = 'Available';
+
+                          if (tbl.status === TableStatus.OCCUPIED) {
+                            statusBg = 'border-amber-500/20 bg-amber-500/5 text-amber-400';
+                            statusLabel = 'Occupied';
+                          } else if (tbl.status === TableStatus.BILL_REQUESTED) {
+                            statusBg = 'border-emerald-500/30 bg-emerald-500/5 text-emerald-400 animate-pulse';
+                            statusLabel = 'Bill Requested';
+                          } else if (tbl.status === TableStatus.CLEANING) {
+                            statusBg = 'border-slate-700 bg-slate-900/40 text-slate-400';
+                            statusLabel = 'Cleaning';
+                          } else if (tbl.status === TableStatus.RESERVED) {
+                            statusBg = 'border-indigo-500/25 bg-indigo-950/20 text-indigo-400';
+                            statusLabel = 'Reserved';
+                          }
+
+                          return (
+                            <div
+                              key={tbl.id}
+                              className={`border p-4.5 rounded-3xl flex flex-col justify-between shadow hover:shadow-lg transition-all ${
+                                activeSess ? 'border-slate-800 bg-[#11131e]/50' : 'border-slate-850 bg-[#11131e]/20'
+                              }`}
+                            >
+                              <div>
+                                <div className="flex items-center justify-between border-b border-slate-850 pb-3 mb-3">
+                                  <div>
+                                    <span className="text-[10px] text-slate-500 font-mono block">TABLE</span>
+                                    <span className="text-sm font-black text-white">T-{tbl.tableNumber}</span>
+                                  </div>
+                                  
+                                  {/* Table Status Badge */}
+                                  <span className={`px-2.5 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-wider font-sans border ${statusBg}`}>
+                                    {statusLabel}
+                                  </span>
+                                </div>
+
+                                <div className="space-y-1.5 mb-4 text-xs">
+                                  <div className="flex justify-between text-slate-400">
+                                    <span>Capacity:</span>
+                                    <span className="font-bold text-white">👥 {tbl.seatingCapacity} Seats</span>
+                                  </div>
+                                  <div className="flex justify-between text-slate-400">
+                                    <span>Running Bill:</span>
+                                    <span className="font-mono font-extrabold text-white">
+                                      {activeSess ? formatIndianCurrency(currentBill, activeRest.currency) : formatIndianCurrency(0, activeRest.currency)}
+                                    </span>
+                                  </div>
+                                  <div className="flex justify-between text-slate-400">
+                                    <span>Session Name:</span>
+                                    <span className="font-semibold text-slate-300 truncate max-w-[120px]">
+                                      {activeSess ? (activeSess.customerName || `Guest (${activeSess.id.substr(-4)})`) : 'No Active Session'}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Waiter Card Action Buttons Block */}
+                              <div className="space-y-2 pt-3 border-t border-slate-850">
+                                {activeSess ? (
+                                  <>
+                                    <div className="grid grid-cols-2 gap-2">
+                                      <button
+                                        onClick={() => handleSelectTableForOrder(tbl)}
+                                        className="bg-amber-500 hover:bg-amber-600 text-slate-950 font-black py-2 rounded-xl text-[10px] cursor-pointer transition text-center uppercase"
+                                      >
+                                        Manual Order
+                                      </button>
+                                      <button
+                                        onClick={() => setViewOrdersTable(tbl)}
+                                        className="bg-slate-800 hover:bg-slate-700 text-slate-200 font-extrabold py-2 rounded-xl text-[10px] cursor-pointer transition text-center uppercase"
+                                      >
+                                        View Orders
+                                      </button>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                      <button
+                                        onClick={async () => {
+                                          if (!window.confirm(`Request bill for Table ${tbl.tableNumber}?`)) return;
+                                          try {
+                                            // Trigger REQUEST_BILL simulated alert
+                                            customerRequestService(ServiceRequestType.REQUEST_BILL);
+                                            // Update table status in database
+                                            await supabase.from('restaurant_tables').update({ status: 'Bill Requested' }).eq('id', tbl.id);
+                                            setTables(prev => prev.map(t => t.id === tbl.id ? { ...t, status: TableStatus.BILL_REQUESTED } : t));
+                                            addSystemNotification(`⚡ Requested bill for Table ${tbl.tableNumber}`);
+                                          } catch (e: any) {
+                                            console.error(e);
+                                          }
+                                        }}
+                                        disabled={tbl.status === TableStatus.BILL_REQUESTED}
+                                        className={`font-bold py-1.5 rounded-xl text-[9px] text-center uppercase transition ${
+                                          tbl.status === TableStatus.BILL_REQUESTED
+                                            ? 'bg-emerald-950/20 text-emerald-600 border border-emerald-950 cursor-not-allowed'
+                                            : 'bg-emerald-500/10 hover:bg-emerald-500 hover:text-slate-950 border border-emerald-500/20 text-emerald-400 cursor-pointer'
+                                        }`}
+                                      >
+                                        {tbl.status === TableStatus.BILL_REQUESTED ? 'Bill Requested' : 'Request Bill'}
+                                      </button>
+                                      
+                                      <button
+                                        onClick={() => {
+                                          setTransferringFromTable(tbl);
+                                          setTransferTargetTableId('');
+                                        }}
+                                        className="bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 font-bold py-1.5 rounded-xl text-[9px] cursor-pointer transition text-center uppercase flex items-center justify-center gap-1"
+                                      >
+                                        <ArrowLeftRight className="w-3 h-3" />
+                                        <span>Transfer</span>
+                                      </button>
+                                    </div>
+
+                                    <button
+                                      onClick={() => {
+                                        addSystemNotification(`🔔 Cashier alerted for Table ${tbl.tableNumber}!`);
+                                      }}
+                                      className="w-full bg-slate-900/60 hover:bg-slate-800/80 text-slate-400 hover:text-slate-100 font-semibold py-1.5 rounded-xl text-[9px] border border-slate-850/60 cursor-pointer transition uppercase text-center"
+                                    >
+                                      Call Cashier Alert
+                                    </button>
+                                  </>
+                                ) : (
+                                  <button
+                                    onClick={() => handleSelectTableForOrder(tbl)}
+                                    className="w-full bg-amber-500 hover:bg-amber-600 text-slate-950 font-black py-2.5 rounded-xl text-[10px] cursor-pointer transition uppercase text-center shadow"
+                                  >
+                                    Start New Session
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        });
+                      })()}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ======================================================== */}
+            {/* SUB-MODAL: DETAILED ORDER HISTORY & WAITER MODIFIER PERMS */}
+            {/* ======================================================== */}
+            {viewOrdersTable && (() => {
+              const activeSess = tableSessions.find(s => s.tableId === viewOrdersTable.id && s.isActive);
+              const sessionOrders = orders.filter((o) => o.sessionId === activeSess?.id && o.status !== OrderStatus.CANCELLED);
+              const totalSum = sessionOrders.reduce((acc, o) => acc + o.totalAmount, 0);
+
+              return (
+                <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
+                  <div className="bg-[#11131e] border border-slate-800 p-6 rounded-2xl w-full max-w-2xl h-[80vh] flex flex-col justify-between shadow-2xl relative">
+                    <button
+                      onClick={() => setViewOrdersTable(null)}
+                      className="absolute top-4 right-4 text-slate-400 hover:text-white cursor-pointer"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+
+                    <div>
+                      <div className="border-b border-slate-850 pb-3 mb-4">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs bg-slate-800 text-amber-400 font-extrabold px-2.5 py-0.5 rounded-lg">
+                            Table {viewOrdersTable.tableNumber}
+                          </span>
+                          <span className="text-sm font-black text-white uppercase tracking-wider">Running Bill & Orders</span>
+                        </div>
+                        <p className="text-[10px] text-slate-500 font-mono mt-1">Session: {activeSess?.id} • Guest: {activeSess?.customerName}</p>
+                      </div>
+
+                      {/* Orders Content list */}
+                      <div className="space-y-4 overflow-y-auto max-h-[50vh] pr-1 scrollbar-thin">
+                        
+                        {/* Summary bill items */}
+                        <div className="bg-slate-950/60 border border-slate-850/60 p-4 rounded-xl space-y-2">
+                          <span className="text-[10px] text-slate-450 font-mono block uppercase tracking-wider font-bold">Itemized Session Bill Summary</span>
+                          <div className="space-y-1.5 pt-1.5">
+                            {sessionOrders.flatMap(o => o.items).map((it, idx) => (
+                              <div key={idx} className="flex justify-between text-xs">
+                                <span className="text-slate-300 font-bold">{it.quantity}x {it.name}</span>
+                                <span className="font-mono text-slate-400">{formatIndianCurrency(it.price * it.quantity, activeRest.currency)}</span>
+                              </div>
+                            ))}
+                            {sessionOrders.length === 0 && (
+                              <span className="text-[10px] text-slate-600 block text-center py-2 font-mono">No items ordered yet in this session.</span>
+                            )}
+                          </div>
+                          {sessionOrders.length > 0 && (
+                            <div className="flex justify-between text-xs font-black border-t border-slate-900 pt-2 text-white">
+                              <span>Subtotal Running Bill:</span>
+                              <span className="text-amber-400 font-mono">{formatIndianCurrency(totalSum, activeRest.currency)}</span>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Separate Orders Breakdown with Audit trail & Waiter perms */}
+                        <div className="space-y-3">
+                          <span className="text-[10px] text-slate-450 font-mono block uppercase tracking-wider font-bold">Placed Orders History & Audit logs</span>
+                          
+                          {sessionOrders.map((ord) => {
+                            const isWaiterOrder = ord.source === 'Waiter' || ord.source === 'Waiter POS';
+                            // Waiters can only modify their own orders before they are preparing/ready
+                            const canWaiterUpdate = isWaiterOrder && (currentUser?.role !== UserRole.WAITER || ord.addedBy === currentUser.fullName) &&
+                              ord.status !== OrderStatus.COMPLETED && ord.status !== OrderStatus.CANCELLED && ord.status !== OrderStatus.SERVED && ord.status !== OrderStatus.READY;
+
+                            return (
+                              <div key={ord.id} className="border border-slate-850 bg-slate-950/20 p-3.5 rounded-xl space-y-3">
+                                <div className="flex items-center justify-between border-b border-slate-900/60 pb-2">
+                                  <div>
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="text-[10px] font-black text-white">Order #{ord.id.substr(-4)}</span>
+                                      <span className="text-[9px] font-mono font-semibold bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded uppercase">{ord.source}</span>
+                                    </div>
+                                    {/* AUDIT TRAIL LOGGING */}
+                                    <span className="text-[9px] text-slate-500 font-mono block mt-1 leading-normal">
+                                      Added By: <strong className="text-slate-300">{ord.addedBy || 'System'}</strong> ({ord.addedByRole || 'Guest'}) • Time: {new Date(ord.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} • Device: Waiter POS
+                                    </span>
+                                  </div>
+
+                                  <span className={`text-[9px] font-black font-mono px-2 py-0.5 rounded uppercase border ${
+                                    ord.status === OrderStatus.PENDING ? 'border-amber-500/25 bg-amber-500/5 text-amber-400' :
+                                    ord.status === OrderStatus.PREPARING ? 'border-blue-500/25 bg-blue-500/5 text-blue-400' :
+                                    ord.status === OrderStatus.READY ? 'border-purple-500/25 bg-purple-500/5 text-purple-400 animate-pulse' :
+                                    'border-slate-800 bg-slate-900 text-slate-400'
+                                  }`}>
+                                    {ord.status}
+                                  </span>
+                                </div>
+
+                                <div className="space-y-2">
+                                  {ord.items.map((it) => (
+                                    <div key={it.id} className="text-xs flex justify-between items-center bg-slate-900/10 p-2 border border-slate-900/30 rounded-lg">
+                                      <div className="min-w-0">
+                                        <span className="text-slate-200 font-bold block">{it.quantity}x {it.name}</span>
+                                        {it.selectedVariant && (
+                                          <span className="text-[9px] text-amber-500 block">({it.selectedVariant.name})</span>
+                                        )}
+                                      </div>
+
+                                      {/* Quantities updates (Waiter own order update) */}
+                                      {canWaiterUpdate ? (
+                                        <div className="flex items-center gap-2">
+                                          <button
+                                            onClick={() => staffUpdateOrderItemQuantity(activeSess!.id, ord.id, it.id, it.quantity - 1)}
+                                            className="p-1 bg-slate-900 border border-slate-800 hover:bg-slate-800 text-slate-350 hover:text-white rounded cursor-pointer transition"
+                                          >
+                                            <Minus className="w-3 h-3" />
+                                          </button>
+                                          <span className="font-mono text-white font-bold text-xs w-4 text-center">{it.quantity}</span>
+                                          <button
+                                            onClick={() => staffUpdateOrderItemQuantity(activeSess!.id, ord.id, it.id, it.quantity + 1)}
+                                            className="p-1 bg-slate-900 border border-slate-800 hover:bg-slate-800 text-slate-350 hover:text-white rounded cursor-pointer transition"
+                                          >
+                                            <Plus className="w-3 h-3" />
+                                          </button>
+                                          <button
+                                            onClick={() => {
+                                              if (window.confirm(`Remove ${it.name} from Order?`)) {
+                                                staffUpdateOrderItemQuantity(activeSess!.id, ord.id, it.id, 0);
+                                              }
+                                            }}
+                                            className="text-rose-450 hover:text-rose-400 text-[10px] pl-1 font-bold"
+                                          >
+                                            Delete
+                                          </button>
+                                        </div>
+                                      ) : (
+                                        <span className="font-mono font-bold text-slate-450 text-[11px]">{formatIndianCurrency(it.price * it.quantity, activeRest.currency)}</span>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => setViewOrdersTable(null)}
+                      className="w-full bg-slate-800 hover:bg-slate-700 text-white py-2.5 rounded-xl text-xs uppercase font-bold cursor-pointer"
+                    >
+                      Close Summary
+                    </button>
+                  </div>
                 </div>
-              )}
-            </div>
+              );
+            })()}
+
+            {/* ======================================================== */}
+            {/* SUB-MODAL: TRANSFER TABLE SYSTEM                       */}
+            {/* ======================================================== */}
+            {transferringFromTable && (
+              <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
+                <div className="bg-[#11131e] border border-slate-800 p-6 rounded-2xl w-full max-w-md shadow-2xl relative space-y-4">
+                  <button
+                    onClick={() => setTransferringFromTable(null)}
+                    className="absolute top-4 right-4 text-slate-400 hover:text-white cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+
+                  <div className="text-center pb-2 border-b border-slate-850">
+                    <span className="text-[10px] text-amber-500 font-mono font-bold block uppercase tracking-widest">TABLE MANAGEMENT</span>
+                    <h3 className="text-sm font-black text-white mt-1">Transfer Table T-{transferringFromTable.tableNumber}</h3>
+                    <p className="text-[10px] text-slate-500 font-mono mt-1">Move active session to another available table</p>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-400 font-mono block uppercase">SELECT TARGET TABLE</label>
+                      <select
+                        value={transferTargetTableId}
+                        onChange={(e) => setTransferTargetTableId(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-850 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 outline-none focus:border-amber-500"
+                      >
+                        <option value="">-- Choose Available Table --</option>
+                        {tables
+                          .filter(t => 
+                            t.restaurantId === selectedRestaurantId &&
+                            (activeBranchId ? t.branchId === activeBranchId : true) &&
+                            t.status === TableStatus.AVAILABLE &&
+                            t.id !== transferringFromTable.id
+                          )
+                          .map(t => (
+                            <option key={t.id} value={t.id}>Table T-{t.tableNumber} (👥 {t.seatingCapacity} Seats)</option>
+                          ))
+                        }
+                      </select>
+                    </div>
+
+                    <div className="flex gap-3 pt-2">
+                      <button
+                        onClick={() => setTransferringFromTable(null)}
+                        className="w-1/2 bg-slate-900 border border-slate-800 text-slate-400 hover:text-white font-bold py-2.5 rounded-xl text-xs uppercase cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={() => handleTransferTable(transferringFromTable.id, transferTargetTableId)}
+                        disabled={!transferTargetTableId}
+                        className={`w-1/2 font-black py-2.5 rounded-xl text-xs uppercase tracking-wider cursor-pointer shadow transition ${
+                          transferTargetTableId
+                            ? 'bg-amber-500 hover:bg-amber-600 text-slate-950'
+                            : 'bg-slate-800 text-slate-600 cursor-not-allowed'
+                        }`}
+                      >
+                        Confirm Transfer
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
           </div>
         )}
 
         {/* ======================================= */}
-        {/* PANEL: CASHIER REGISTER / INVOICE POS */}
-        {/* =====================================        {/* ======================================= */}
-        {/* PANEL: CASHIER REGISTER / INVOICE POS */}
+        {/* PANEL: CASHIER REGISTER / INVOICE POS   */}
         {/* ======================================= */}
         {staffSubRole === 'cashier' && (
           <div className="space-y-6">
@@ -1980,153 +2976,181 @@ export default function StaffConsole() {
               </div>
             )}
 
-            {/* Customize Item Modal */}
-            {customizingItem && (
-              <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
-                <div className="bg-[#11131e] border border-slate-800 p-6 rounded-2xl w-full max-w-md shadow-2xl relative space-y-4">
-                  <button
-                    onClick={() => setCustomizingItem(null)}
-                    className="absolute top-4 right-4 text-slate-400 hover:text-white cursor-pointer"
-                  >
-                    <X className="w-5 h-5" />
-                  </button>
+           </div>
+         )}
 
-                  <div className="text-center pb-2 border-b border-slate-800">
-                    <span className="text-[10px] text-amber-500 font-mono font-bold block uppercase tracking-widest">CUSTOMIZE ITEM</span>
-                    <h3 className="text-sm font-black text-white mt-1">{customizingItem.name}</h3>
-                  </div>
+         {/* Customize Item Modal */}
+         {customizingItem && (
+           <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
+             <div className="bg-[#11131e] border border-slate-800 p-6 rounded-2xl w-full max-w-md shadow-2xl relative space-y-4">
+               <button
+                 onClick={() => setCustomizingItem(null)}
+                 className="absolute top-4 right-4 text-slate-400 hover:text-white cursor-pointer"
+               >
+                 <X className="w-5 h-5" />
+               </button>
 
-                  <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-1">
-                    {/* Variants */}
-                    {customizingItem.variants && customizingItem.variants.length > 0 && (
-                      <div className="space-y-1.5">
-                        <span className="text-[10px] font-bold text-slate-450 font-mono block uppercase">CHOOSE PORTION / VARIANT</span>
-                        <div className="space-y-2">
-                          {customizingItem.variants.map((v: any) => (
-                            <label
-                              key={v.id}
-                              className={`flex items-center justify-between p-2.5 rounded-xl border cursor-pointer text-xs font-semibold transition-all ${
-                                selectedVariantId === v.id
-                                  ? 'bg-slate-900 border-amber-500 text-amber-400'
-                                  : 'bg-slate-950 border-slate-850 hover:bg-slate-900 text-slate-300'
-                              }`}
-                            >
-                              <div className="flex items-center gap-2">
-                                <input
-                                  type="radio"
-                                  name="menu-variant"
-                                  checked={selectedVariantId === v.id}
-                                  onChange={() => setSelectedVariantId(v.id)}
-                                  className="accent-amber-500"
-                                />
-                                <span>{v.name}</span>
-                              </div>
-                              <span className="font-mono">+{formatIndianCurrency(v.price, activeRest.currency)}</span>
-                            </label>
-                          ))}
-                        </div>
-                      </div>
-                    )}
+               <div className="text-center pb-2 border-b border-slate-800">
+                 <span className="text-[10px] text-amber-500 font-mono font-bold block uppercase tracking-widest">CUSTOMIZE ITEM</span>
+                 <h3 className="text-sm font-black text-white mt-1">{customizingItem.name}</h3>
+               </div>
 
-                    {/* Add-ons */}
-                    {customizingItem.addons && customizingItem.addons.length > 0 && (
-                      <div className="space-y-1.5">
-                        <span className="text-[10px] font-bold text-slate-455 font-mono block uppercase">CHOOSE OPTIONAL ADD-ONS</span>
-                        <div className="space-y-2">
-                          {customizingItem.addons.map((a: any) => {
-                            const isChecked = selectedAddonIds.includes(a.id);
-                            return (
-                              <label
-                                key={a.id}
-                                className={`flex items-center justify-between p-2.5 rounded-xl border cursor-pointer text-xs font-semibold transition-all ${
-                                  isChecked
-                                    ? 'bg-slate-900 border-amber-500/80 text-amber-400'
-                                    : 'bg-slate-950 border-slate-850 hover:bg-slate-900 text-slate-300'
-                                }`}
-                              >
-                                <div className="flex items-center gap-2">
-                                  <input
-                                    type="checkbox"
-                                    checked={isChecked}
-                                    onChange={(e) => {
-                                      if (e.target.checked) {
-                                        setSelectedAddonIds([...selectedAddonIds, a.id]);
-                                      } else {
-                                        setSelectedAddonIds(selectedAddonIds.filter((id) => id !== a.id));
-                                      }
-                                    }}
-                                    className="accent-amber-500"
-                                  />
-                                  <span>{a.name}</span>
-                                </div>
-                                <span className="font-mono">+{formatIndianCurrency(a.price, activeRest.currency)}</span>
-                              </label>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
+               <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-1">
+                 {/* Variants */}
+                 {customizingItem.variants && customizingItem.variants.length > 0 && (
+                   <div className="space-y-1.5">
+                     <span className="text-[10px] font-bold text-slate-450 font-mono block uppercase">CHOOSE PORTION / VARIANT</span>
+                     <div className="space-y-2">
+                       {customizingItem.variants.map((v: any) => (
+                         <label
+                           key={v.id}
+                           className={`flex items-center justify-between p-2.5 rounded-xl border cursor-pointer text-xs font-semibold transition-all ${
+                             selectedVariantId === v.id
+                               ? 'bg-slate-900 border-amber-500 text-amber-400'
+                               : 'bg-slate-950 border-slate-850 hover:bg-slate-900 text-slate-300'
+                           }`}
+                         >
+                           <div className="flex items-center gap-2">
+                             <input
+                               type="radio"
+                               name="menu-variant"
+                               checked={selectedVariantId === v.id}
+                               onChange={() => setSelectedVariantId(v.id)}
+                               className="accent-amber-500"
+                             />
+                             <span>{v.name}</span>
+                           </div>
+                           <span className="font-mono">+{formatIndianCurrency(v.price, activeRest.currency)}</span>
+                         </label>
+                       ))}
+                     </div>
+                   </div>
+                 )}
 
-                    {/* Quantity Selector */}
-                    <div className="flex items-center justify-between border-t border-slate-800 pt-3">
-                      <span className="text-[10px] font-bold text-slate-455 font-mono uppercase">Enter Quantity</span>
-                      <div className="flex items-center gap-3 bg-slate-950 p-1.5 rounded-xl border border-slate-850">
-                        <button
-                          type="button"
-                          onClick={() => setCustomizingQty(Math.max(1, customizingQty - 1))}
-                          className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white cursor-pointer"
-                        >
-                          <Minus className="w-3.5 h-3.5" />
-                        </button>
-                        <span className="text-xs font-black text-white font-mono w-4 text-center">{customizingQty}</span>
-                        <button
-                          type="button"
-                          onClick={() => setCustomizingQty(customizingQty + 1)}
-                          className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white cursor-pointer"
-                        >
-                          <Plus className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
+                 {/* Add-ons */}
+                 {customizingItem.addons && customizingItem.addons.length > 0 && (
+                   <div className="space-y-1.5">
+                     <span className="text-[10px] font-bold text-slate-455 font-mono block uppercase">CHOOSE OPTIONAL ADD-ONS</span>
+                     <div className="space-y-2">
+                       {customizingItem.addons.map((a: any) => {
+                         const isChecked = selectedAddonIds.includes(a.id);
+                         return (
+                           <label
+                             key={a.id}
+                             className={`flex items-center justify-between p-2.5 rounded-xl border cursor-pointer text-xs font-semibold transition-all ${
+                               isChecked
+                                 ? 'bg-slate-900 border-amber-500/80 text-amber-400'
+                                 : 'bg-slate-950 border-slate-850 hover:bg-slate-900 text-slate-300'
+                             }`}
+                           >
+                             <div className="flex items-center gap-2">
+                               <input
+                                 type="checkbox"
+                                 checked={isChecked}
+                                 onChange={(e) => {
+                                   if (e.target.checked) {
+                                     setSelectedAddonIds([...selectedAddonIds, a.id]);
+                                   } else {
+                                     setSelectedAddonIds(selectedAddonIds.filter((id) => id !== a.id));
+                                   }
+                                 }}
+                                 className="accent-amber-500"
+                               />
+                               <span>{a.name}</span>
+                             </div>
+                             <span className="font-mono">+{formatIndianCurrency(a.price, activeRest.currency)}</span>
+                           </label>
+                         );
+                       })}
+                     </div>
+                   </div>
+                 )}
 
-                    {/* Special Instructions */}
-                    <div className="space-y-1">
-                      <label className="text-[10px] font-bold text-slate-455 font-mono block uppercase">SPECIAL COOKING NOTES</label>
-                      <textarea
-                        rows={2}
-                        value={specialInstructions}
-                        onChange={(e) => setSpecialInstructions(e.target.value)}
-                        placeholder="e.g., Less spicy, no onions, extra ice..."
-                        className="w-full bg-slate-950 border border-slate-850 rounded-xl px-3 py-2 text-xs text-slate-200 outline-none focus:border-amber-500 placeholder-slate-650 resize-none font-sans"
-                      />
-                    </div>
-                  </div>
+                 {/* Quantity Selector */}
+                 <div className="flex items-center justify-between border-t border-slate-800 pt-3">
+                   <span className="text-[10px] font-bold text-slate-455 font-mono uppercase">Enter Quantity</span>
+                   <div className="flex items-center gap-3 bg-slate-950 p-1.5 rounded-xl border border-slate-850">
+                     <button
+                       type="button"
+                       onClick={() => setCustomizingQty(Math.max(1, customizingQty - 1))}
+                       className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white cursor-pointer"
+                     >
+                       <Minus className="w-3.5 h-3.5" />
+                     </button>
+                     <span className="text-xs font-black text-white font-mono w-4 text-center">{customizingQty}</span>
+                     <button
+                       type="button"
+                       onClick={() => setCustomizingQty(customizingQty + 1)}
+                       className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white cursor-pointer"
+                     >
+                       <Plus className="w-3.5 h-3.5" />
+                     </button>
+                   </div>
+                 </div>
 
-                  {/* Add action */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const selectedVariant = customizingItem.variants?.find((v: any) => v.id === selectedVariantId);
-                      const selectedAddons = customizingItem.addons?.filter((a: any) => selectedAddonIds.includes(a.id)) || [];
-                      
-                      staffAddItemsToBill(activeBillSettleSessionId!, [{
-                        item: customizingItem,
-                        quantity: customizingQty,
-                        selectedVariant,
-                        selectedAddons,
-                        specialInstructions
-                      }]);
+                 {/* Special Instructions */}
+                 <div className="space-y-1">
+                   <label className="text-[10px] font-bold text-slate-455 font-mono block uppercase">SPECIAL COOKING NOTES</label>
+                   <textarea
+                     rows={2}
+                     value={specialInstructions}
+                     onChange={(e) => setSpecialInstructions(e.target.value)}
+                     placeholder="e.g., Less spicy, no onions, extra ice..."
+                     className="w-full bg-slate-950 border border-slate-850 rounded-xl px-3 py-2 text-xs text-slate-200 outline-none focus:border-amber-500 placeholder-slate-650 resize-none font-sans"
+                   />
+                 </div>
+               </div>
 
-                      setCustomizingItem(null);
-                    }}
-                    className="w-full bg-amber-500 hover:bg-amber-600 text-slate-950 font-black py-2.5 rounded-xl text-xs uppercase tracking-wider cursor-pointer shadow transition active:scale-95"
-                  >
-                    Confirm Add to Bill
-                  </button>
-                </div>
-              </div>
-            )}
+               {/* Add action */}
+               <button
+                 type="button"
+                 onClick={() => {
+                   const selectedVariant = customizingItem.variants?.find((v: any) => v.id === selectedVariantId);
+                   const selectedAddons = customizingItem.addons?.filter((a: any) => selectedAddonIds.includes(a.id)) || [];
+                   
+                   if (waiterSelectedTable) {
+                     // Waiter POS Mode: Add to local waiter cart
+                     const newCartItem = {
+                       id: `w_cart_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+                       item: customizingItem,
+                       quantity: customizingQty,
+                       selectedVariant,
+                       selectedAddons,
+                       specialInstructions
+                     };
+                     setWaiterCart((prev) => {
+                       const idx = prev.findIndex(c => 
+                         c.item.id === customizingItem.id &&
+                         c.selectedVariant?.id === selectedVariant?.id &&
+                         c.selectedAddons.length === selectedAddons.length &&
+                         c.selectedAddons.every(a => selectedAddons.some(o => o.id === a.id))
+                       );
+                       if (idx > -1) {
+                         const updated = [...prev];
+                         updated[idx].quantity += customizingQty;
+                         return updated;
+                       }
+                       return [...prev, newCartItem];
+                     });
+                     addSystemNotification(`🛒 Added ${customizingQty}x ${customizingItem.name} to waiter order cart.`);
+                   } else {
+                     // Cashier POS Mode: Add to active cashier session
+                     staffAddItemsToBill(activeBillSettleSessionId!, [{
+                       item: customizingItem,
+                       quantity: customizingQty,
+                       selectedVariant,
+                       selectedAddons,
+                       specialInstructions
+                     }]);
+                   }
 
+                   setCustomizingItem(null);
+                 }}
+                 className="w-full bg-amber-500 hover:bg-amber-600 text-slate-950 font-black py-2.5 rounded-xl text-xs uppercase tracking-wider cursor-pointer shadow transition active:scale-95"
+               >
+                 Confirm Add to Bill
+               </button>
+             </div>
            </div>
          )}
           </>

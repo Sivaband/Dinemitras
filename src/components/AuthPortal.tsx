@@ -39,8 +39,7 @@ export default function AuthPortal({ initialRequestedRole }: AuthPortalProps) {
     logout,
     verifyOnboardingEmail,
     onboardingSetupRestaurant,
-    onboardingSetupBranch,
-    onboardingSetupTables
+    onboardingSetupBranch
   } = useAppState();
 
   const getInitialMode = (): 'login' | 'signup' | 'forgot' => {
@@ -92,11 +91,13 @@ export default function AuthPortal({ initialRequestedRole }: AuthPortalProps) {
   const [onbLogo, setOnbLogo] = useState('https://images.unsplash.com/photo-1555396273-367ea4eb4db5?w=120&auto=format&fit=crop&q=60');
   const [onbDesc, setOnbDesc] = useState('Crafted recipes made with premium fresh ingredients.');
   
-  const [onbBranchName, setOnbBranchName] = useState('Main Bistro Outlet');
-  const [onbBranchAddress, setOnbBranchAddress] = useState('742 Evergreen Terrace, Downtown');
-  const [onbBranchPhone, setOnbBranchPhone] = useState('+1 (555) 890-1234');
+  const [onbBranchName, setOnbBranchName] = useState('');
+  const [onbBranchAddress, setOnbBranchAddress] = useState('');
+  const [onbBranchPhone, setOnbBranchPhone] = useState('+91 96*******84');
 
   const [onbTableCount, setOnbTableCount] = useState(8);
+  const [isSettingUp, setIsSettingUp] = useState(false);
+  const [onbError, setOnbError] = useState('');
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -149,7 +150,7 @@ export default function AuthPortal({ initialRequestedRole }: AuthPortalProps) {
           <div className="flex items-center justify-between mb-8">
             <div>
               <span className="text-amber-400 font-mono text-xs uppercase tracking-widest font-semibold block mb-1">
-                Step {step} of 4 • Tenant Provisioning
+                Step {step} of 3 • Tenant Provisioning
               </span>
               <h2 className="text-xl md:text-2xl font-bold text-white tracking-tight">Onboarding Brand Owner</h2>
             </div>
@@ -162,8 +163,8 @@ export default function AuthPortal({ initialRequestedRole }: AuthPortalProps) {
           </div>
 
           {/* Progress Indicators */}
-          <div className="grid grid-cols-4 gap-2 mb-8">
-            {[1, 2, 3, 4].map((s) => (
+          <div className="grid grid-cols-3 gap-2 mb-8">
+            {[1, 2, 3].map((s) => (
               <div key={s} className="flex flex-col gap-1.5">
                 <div
                   className={`h-1.5 rounded-full transition-all duration-300 ${
@@ -175,7 +176,7 @@ export default function AuthPortal({ initialRequestedRole }: AuthPortalProps) {
                   }`}
                 />
                 <span className="text-[9px] text-center font-mono uppercase font-semibold tracking-wider text-slate-500 hidden sm:inline">
-                  {s === 1 ? 'Verify Email' : s === 2 ? 'Tenant Setup' : s === 3 ? 'Add Branch' : 'Generate QRs'}
+                  {s === 1 ? 'Verify Email' : s === 2 ? 'Tenant Setup' : 'Add Branch & Finish'}
                 </span>
               </div>
             ))}
@@ -289,18 +290,36 @@ export default function AuthPortal({ initialRequestedRole }: AuthPortalProps) {
                   />
                 </div>
 
+                {onbError && (
+                  <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-3 text-red-400 text-xs text-center font-medium">
+                    {onbError}
+                  </div>
+                )}
+
                 <button
-                  onClick={() =>
-                    onboardingSetupRestaurant({
-                      name: regRestaurantName,
-                      cuisine: onbCuisine,
-                      logo: onbLogo,
-                      description: onbDesc
-                    })
-                  }
-                  className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-slate-950 font-bold py-3 px-4 rounded-xl cursor-pointer shadow-lg shadow-amber-500/10 transition-all duration-200"
+                  disabled={isSettingUp}
+                  onClick={async () => {
+                    setIsSettingUp(true);
+                    setOnbError('');
+                    try {
+                      const res = await onboardingSetupRestaurant({
+                        name: regRestaurantName,
+                        cuisine: onbCuisine,
+                        logo: onbLogo,
+                        description: onbDesc
+                      });
+                      if (res && !res.success) {
+                        setOnbError(res.error || 'Failed to setup restaurant tenant.');
+                      }
+                    } catch (err: any) {
+                      setOnbError(err.message || 'An unexpected error occurred.');
+                    } finally {
+                      setIsSettingUp(false);
+                    }
+                  }}
+                  className={`w-full flex items-center justify-center gap-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-slate-950 font-bold py-3 px-4 rounded-xl cursor-pointer shadow-lg shadow-amber-500/10 transition-all duration-200 ${isSettingUp ? 'opacity-50 cursor-not-allowed' : ''}`}
                 >
-                  <span>Provision Restaurant Tenant</span>
+                  <span>{isSettingUp ? 'Provisioning Tenant...' : 'Provision Restaurant Tenant'}</span>
                   <ArrowRight className="w-4 h-4" />
                 </button>
               </div>
@@ -365,65 +384,32 @@ export default function AuthPortal({ initialRequestedRole }: AuthPortalProps) {
                   </div>
                 </div>
 
+                {onbError && (
+                  <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-3 text-red-400 text-xs text-center font-medium">
+                    {onbError}
+                  </div>
+                )}
+
                 <button
-                  onClick={() => onboardingSetupBranch(onbBranchName, onbBranchAddress, onbBranchPhone)}
-                  className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-slate-950 font-bold py-3 px-4 rounded-xl cursor-pointer shadow-lg shadow-amber-500/10 transition-all duration-200"
+                  disabled={isSettingUp}
+                  onClick={async () => {
+                    setIsSettingUp(true);
+                    setOnbError('');
+                    try {
+                      const res = await onboardingSetupBranch(onbBranchName, onbBranchAddress, onbBranchPhone);
+                      if (res && !res.success) {
+                        setOnbError(res.error || 'Failed to register branch.');
+                      }
+                    } catch (err: any) {
+                      setOnbError(err.message || 'An unexpected error occurred.');
+                    } finally {
+                      setIsSettingUp(false);
+                    }
+                  }}
+                  className={`w-full flex items-center justify-center gap-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-slate-950 font-bold py-3 px-4 rounded-xl cursor-pointer shadow-lg shadow-amber-500/10 transition-all duration-200 ${isSettingUp ? 'opacity-50 cursor-not-allowed' : ''}`}
                 >
-                  <span>Register Outlet & Branch</span>
+                  <span>{isSettingUp ? 'Registering Outlet...' : 'Register Outlet & Branch'}</span>
                   <ArrowRight className="w-4 h-4" />
-                </button>
-              </div>
-            </motion.div>
-          )}
-
-          {/* Step 4: Generate Tables */}
-          {step === 4 && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="space-y-6"
-            >
-              <div className="bg-slate-950 border border-slate-800 rounded-2xl p-5 text-center">
-                <div className="mx-auto w-12 h-12 bg-amber-500/10 text-amber-400 flex items-center justify-center rounded-xl mb-3">
-                  <QrCode className="w-6 h-6 animate-pulse" />
-                </div>
-                <h3 className="font-semibold text-white mb-1 text-sm">Generate Digital QR Codes</h3>
-                <p className="text-xs text-slate-400 leading-relaxed max-w-sm mx-auto">
-                  Instantly produce high-fidelity dining tables with individual scanning targets. Diners can scan these tables to order.
-                </p>
-              </div>
-
-              <div className="space-y-4">
-                <div>
-                  <div className="flex justify-between items-center mb-1.5">
-                    <label className="text-[10px] font-mono text-slate-400 uppercase tracking-wider block font-semibold">
-                      Number of Tables to Provision
-                    </label>
-                    <span className="text-xs font-mono font-bold text-amber-400 bg-amber-400/5 px-2 py-0.5 rounded border border-amber-500/10">
-                      {onbTableCount} Tables
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min="1"
-                    max="20"
-                    value={onbTableCount}
-                    onChange={(e) => setOnbTableCount(parseInt(e.target.value))}
-                    className="w-full accent-amber-500 cursor-pointer h-1.5 bg-slate-800 rounded-lg appearance-none"
-                  />
-                  <div className="flex justify-between text-[9px] text-slate-500 font-mono mt-1">
-                    <span>1 Table</span>
-                    <span>10 Tables</span>
-                    <span>20 Tables</span>
-                  </div>
-                </div>
-
-                <button
-                  onClick={() => onboardingSetupTables(onbTableCount)}
-                  className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-600 hover:to-teal-600 text-slate-950 font-bold py-3 px-4 rounded-xl cursor-pointer shadow-lg shadow-emerald-500/10 transition-all duration-200"
-                >
-                  <span>Generate QR Tables & Activate Dashboard</span>
-                  <Check className="w-4 h-4" />
                 </button>
               </div>
             </motion.div>
@@ -654,7 +640,7 @@ export default function AuthPortal({ initialRequestedRole }: AuthPortalProps) {
                 Login
               </button>
 
-              <div className="border-t border-slate-800/80 pt-4 mt-4 text-center">
+              <div className="border-t border-slate-800/80 pt-4 mt-4 text-center space-y-3">
                 <button
                   type="button"
                   onClick={() => {
@@ -666,6 +652,19 @@ export default function AuthPortal({ initialRequestedRole }: AuthPortalProps) {
                   <span>New owner?</span>
                   <span className="text-amber-500 font-bold hover:underline">Create Restaurant Account</span>
                 </button>
+
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      window.history.pushState(null, '', '/customer');
+                      window.dispatchEvent(new Event('popstate'));
+                    }}
+                    className="text-[11px] text-amber-500/80 hover:text-amber-400 font-bold bg-amber-500/5 hover:bg-amber-500/10 border border-amber-500/10 hover:border-amber-500/20 px-3 py-1.5 rounded-lg cursor-pointer transition-all duration-200"
+                  >
+                    Go to Guest Ordering App
+                  </button>
+                </div>
               </div>
             </form>
           ) : (

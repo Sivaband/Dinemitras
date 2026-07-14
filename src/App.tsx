@@ -11,14 +11,14 @@ import AdminDashboard from './components/AdminDashboard';
 import SuperAdminDashboard from './components/SuperAdminDashboard';
 import AuthPortal from './components/AuthPortal';
 import { UserRole } from './types';
-import { 
-  Laptop, 
-  Smartphone, 
-  Layers, 
-  LogIn, 
-  Store, 
-  ChevronRight, 
-  ChefHat, 
+import {
+  Laptop,
+  Smartphone,
+  Layers,
+  LogIn,
+  Store,
+  ChevronRight,
+  ChefHat,
   ShieldCheck,
   Zap,
   LogOut,
@@ -28,10 +28,10 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 
 function AppContent() {
-  const { 
-    currentUser, 
-    logout, 
-    notifications, 
+  const {
+    currentUser,
+    logout,
+    notifications,
     clearNotifications,
     selectedRestaurantId,
     restaurants,
@@ -68,7 +68,7 @@ function AppContent() {
   };
 
   const isMenuRoute = path.startsWith('/menu/');
-  const isCustomerRoute = isMenuRoute || path === '/customer' || path === '/order-status';
+  const isCustomerRoute = isMenuRoute || path === '/customer' || path === '/order-status' || !!activeSession;
 
   // Parse table / restaurant IDs on customer QR routes
   useEffect(() => {
@@ -102,7 +102,7 @@ function AppContent() {
     const isDashboardRoute = [
       '/dashboard', '/orders', '/menu', '/tables', '/analytics', '/offers', '/coupons', '/banners', '/settings'
     ].includes(path);
-    
+
     if (!currentUser && isDashboardRoute) {
       navigate('/login');
     }
@@ -162,62 +162,39 @@ function AppContent() {
 
   return (
     <div className="min-h-screen bg-[#090a0f] text-slate-100 flex flex-col font-sans antialiased overflow-hidden selection:bg-amber-500/20 selection:text-amber-400">
-      
+
       {/* Toast Notification Container */}
-      <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 pointer-events-none flex flex-col gap-2 w-full max-w-sm px-4">
-        <AnimatePresence>
-          {notifications.slice(0, 1).map((notif, index) => (
-            <motion.div
-              key={index}
-              initial={{ opacity: 0, y: -20, scale: 0.95 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -10, scale: 0.9 }}
-              transition={{ duration: 0.2 }}
-              className="bg-slate-900/95 border border-emerald-500/40 text-slate-100 px-4 py-3 rounded-xl shadow-2xl flex items-start gap-2.5 pointer-events-auto ring-1 ring-emerald-500/10"
-            >
-              <div className="bg-emerald-500/15 p-1 rounded-lg text-emerald-400 shrink-0 mt-0.5">
-                <Zap className="w-4 h-4 animate-pulse" />
-              </div>
-              <div className="flex-1 text-xs">
-                <span className="font-semibold text-emerald-400 block mb-0.5">DB Signal Event</span>
-                <p className="text-slate-300 font-medium leading-relaxed">
-                  {notif.replace(/^[💻📲👤🛒🎟️🔔⚡👨‍🍳🔥🍽️✅❌🏁]/, '')}
-                </p>
-              </div>
-            </motion.div>
-          ))}
-        </AnimatePresence>
-      </div>
+      {/* {!isCustomerRoute && currentUser?.role !== UserRole.CUSTOMER_GUEST && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 pointer-events-none flex flex-col gap-2 w-full max-w-sm px-4">
+          <AnimatePresence>
+            {notifications.slice(0, 1).map((notif, index) => (
+              <motion.div
+                key={index}
+                initial={{ opacity: 0, y: -20, scale: 0.95 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -10, scale: 0.9 }}
+                transition={{ duration: 0.2 }}
+                className="bg-slate-900/95 border border-emerald-500/40 text-slate-100 px-4 py-3 rounded-xl shadow-2xl flex items-start gap-2.5 pointer-events-auto ring-1 ring-emerald-500/10"
+              >
+                <div className="bg-emerald-500/15 p-1 rounded-lg text-emerald-400 shrink-0 mt-0.5">
+                  <Zap className="w-4 h-4 animate-pulse" />
+                </div>
+                <div className="flex-1 text-xs">
+                  <span className="font-semibold text-emerald-400 block mb-0.5">DB Signal skjcaskcajsEvent</span>
+                  <p className="text-slate-300 font-medium leading-relaxed">
+                    {notif.replace(/^[💻📲👤🛒🎟️🔔⚡👨‍🍳🔥🍽️✅❌🏁]/, '')}
+                  </p>
+                </div>
+              </motion.div>
+            ))}
+          </AnimatePresence>
+        </div>
+      )} */}
 
       {/* Conditional Layout Routing */}
       {currentUser ? (
         // LOGGED-IN EXPERIENCE (Full screen, no simulators)
         <div className="flex-1 flex flex-col h-screen overflow-hidden">
-          {/* Subtle responsive bar for branding & logout */}
-          <header className="bg-[#11131e]/90 border-b border-slate-800/60 px-4 py-2 flex items-center justify-between shrink-0 z-10 backdrop-blur-md">
-            <div className="flex items-center gap-2">
-              <div className="bg-gradient-to-tr from-amber-500 to-rose-500 p-1.5 rounded-lg shadow">
-                <Layers className="w-4 h-4 text-white" />
-              </div>
-              <div>
-                <span className="font-bold text-xs tracking-tight text-white block">Sizzlr QR Console</span>
-                <span className="text-[9px] font-mono text-slate-400 uppercase">
-                  Logged in as {currentUser.fullName} ({currentUser.role.replace('_', ' ')})
-                </span>
-              </div>
-            </div>
-            <button
-              onClick={() => {
-                logout();
-                navigate('/login');
-              }}
-              className="flex items-center gap-1 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 px-2.5 py-1 rounded-lg text-[10px] font-bold cursor-pointer transition active:scale-95"
-            >
-              <LogOut className="w-3 h-3" />
-              <span>Sign Out</span>
-            </button>
-          </header>
-
           <div className="flex-1 overflow-hidden relative flex flex-col">
             {renderRoleDashboard()}
           </div>
@@ -227,21 +204,8 @@ function AppContent() {
         <div className="flex-1 flex flex-col h-screen overflow-hidden">
           {isCustomerRoute ? (
             // CUSTOMER ROUTE: Renders CustomerApp directly in full screen
-            <div className="flex-1 flex flex-col overflow-hidden relative">
-              {/* Subtle top banner promoting staff login discretely */}
-              <div className="bg-[#11131e] border-b border-slate-800/60 px-4 py-2 flex items-center justify-between shrink-0">
-                <span className="text-[10px] text-slate-400 font-medium">Digital Table Ordering System</span>
-                <button
-                  onClick={() => navigate('/login')}
-                  className="flex items-center gap-1 text-[10px] bg-slate-800 text-amber-400 hover:text-white px-2 py-1 rounded border border-slate-700 font-bold transition cursor-pointer"
-                >
-                  <LogIn className="w-3 h-3" />
-                  <span>Staff Portal</span>
-                </button>
-              </div>
-              <div className="flex-1 overflow-hidden relative flex flex-col">
-                <CustomerApp />
-              </div>
+            <div className="flex-1 overflow-hidden relative flex flex-col">
+              <CustomerApp />
             </div>
           ) : (
             // PUBLIC AUTH ROUTES: Renders clean AuthPortal in full screen (no simulator/previews)
