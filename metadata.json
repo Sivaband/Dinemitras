@@ -1,0 +1,8 @@
+{
+  "name": "QR Restaurant Ordering System",
+  "description": "Multi-Tenant QR Restaurant Ordering Platform featuring interactive Guest Mobile Menu, KDS Kitchen Display System, Waiter Alert boards, Cashier settlement registers, and brand analytics.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
