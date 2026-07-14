@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name"> DineMitras</string>
+    <string name="title_activity_main"> DineMitras</string>
+    <string name="package_name">com.dinemitras.app</string>
+    <string name="custom_url_scheme">com.dinemitras.app</string>
+</resources>
