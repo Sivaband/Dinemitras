@@ -45,6 +45,7 @@ import {
   INITIAL_COUPONS,
   MOCK_ORDERS
 } from './mockData';
+import { APP_CONFIG } from './config/app';
 
 const getTableStatusString = (s: TableStatus) => {
   switch (s) {
@@ -325,7 +326,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       branchId: toUUID(t.branchId),
       restaurantId: toUUID(t.restaurantId),
       isActive: t.isActive !== false,
-      qrUrl: `${window.location.origin}/menu/${toUUID(t.restaurantId)}/${toUUID(t.branchId)}/${toUUID(t.id)}`,
+      qrUrl: `${APP_CONFIG.WEB_URL}/menu/${toUUID(t.restaurantId)}/${toUUID(t.branchId)}/${toUUID(t.id)}`,
     }));
   });
 
@@ -784,7 +785,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
           seatingCapacity: t.capacity,
           status: t.status.toLowerCase().replace(' ', '_') as TableStatus,
           isActive: t.status !== 'Cleaning' && t.status !== 'Reserved',
-          qrUrl: `${window.location.origin}/menu/${t.restaurant_id}/${t.branch_id}/${t.id}`
+          qrUrl: `${APP_CONFIG.WEB_URL}/menu/${t.restaurant_id}/${t.branch_id}/${t.id}`
         })));
       }
       if (dbCats) {
@@ -2268,7 +2269,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     }
 
     const tableId = toUUID(`table_${Date.now()}`);
-    const qrUrl = `${window.location.origin}/menu/${table.restaurantId}/${branchId}/${tableId}`;
+    const qrUrl = `${APP_CONFIG.WEB_URL}/menu/${table.restaurantId}/${branchId}/${tableId}`;
     const newTable: RestaurantTable = {
       ...table,
       branchId,
@@ -2338,7 +2339,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
           if (finalBranchId) {
             updated.branchId = finalBranchId;
           }
-          updated.qrUrl = `${window.location.origin}/menu/${updated.restaurantId}/${updated.branchId}/${updated.id}`;
+          updated.qrUrl = `${APP_CONFIG.WEB_URL}/menu/${updated.restaurantId}/${updated.branchId}/${updated.id}`;
           return updated;
         }
         return t;
@@ -3050,7 +3051,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         tableNumber: i < 10 ? `0${i}` : `${i}`,
         seatingCapacity: i % 2 === 0 ? 4 : 2,
         status: TableStatus.AVAILABLE,
-        qrUrl: `${window.location.origin}/menu/${currentUser.restaurantId}/${currentUser.branchId}/${tableId}`,
+        qrUrl: `${APP_CONFIG.WEB_URL}/menu/${currentUser.restaurantId}/${currentUser.branchId}/${tableId}`,
       });
     }
 

@@ -54,6 +54,7 @@ import {
 import { Restaurant, MenuCategory, MenuItem, Coupon, Banner, UserRole, formatIndianCurrency, RestaurantTable, TableStatus } from '../types';
 import AuthPortal from './AuthPortal';
 import { useEmployeeViewModel } from '../viewmodels/EmployeeViewModel';
+import { APP_CONFIG } from '../config/app';
 
 export default function AdminDashboard() {
   const {
@@ -851,7 +852,7 @@ export default function AdminDashboard() {
   };
 
   const handleRegenerateQR = (table: RestaurantTable) => {
-    const newQrUrl = `${window.location.origin}/menu/${table.restaurantId}/${table.branchId}/${table.id}?refresh=${Date.now()}`;
+    const newQrUrl = `${APP_CONFIG.WEB_URL}/menu/${table.restaurantId}/${table.branchId}/${table.id}?refresh=${Date.now()}`;
     adminUpdateTable(table.id, { qrUrl: newQrUrl });
     addSystemNotification(`🔄 Regenerated QR Code for Table ${table.tableNumber}.`);
   };

@@ -147,16 +147,20 @@ export default function QrCameraScanner({
         branchId = url.searchParams.get('branchId') || url.searchParams.get('branch_id') || url.searchParams.get('b') || '';
         tableId = url.searchParams.get('tableId') || url.searchParams.get('table_id') || url.searchParams.get('t') || '';
 
-        // If path segment format, e.g. /scan/rest_1/branch_1a/table_1_2
+        // If path segment format, e.g. /scan/rest_1/branch_1a/table_1_2 or /menu/rest_1/branch_1a/table_1_2
         if (!tableId) {
           const segments = url.pathname.split('/').filter(Boolean);
-          // e.g. ["scan", "rest_1", "branch_1a", "table_1_2"]
           if (segments.length >= 3) {
             const index = segments.indexOf('scan');
+            const menuIndex = segments.indexOf('menu');
             if (index !== -1 && segments[index + 3]) {
               restaurantId = segments[index + 1];
               branchId = segments[index + 2];
               tableId = segments[index + 3];
+            } else if (menuIndex !== -1 && segments[menuIndex + 3]) {
+              restaurantId = segments[menuIndex + 1];
+              branchId = segments[menuIndex + 2];
+              tableId = segments[menuIndex + 3];
             } else if (segments.length === 3) {
               restaurantId = segments[0];
               branchId = segments[1];
